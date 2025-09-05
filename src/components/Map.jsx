@@ -23,7 +23,7 @@ export default function Map({ place }) {
         mapTypeControl: false,
         streetViewControl: false,
       })
-    })
+    }).catch(err => console.error('Maps loader error:', err))
 
     return () => { isMounted = false }
   }, [])
