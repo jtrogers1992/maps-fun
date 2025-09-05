@@ -8,7 +8,6 @@ export default function WikiPanel({ state }) {
   const pool = state.pool || []
   const [offset, setOffset] = useState(0) // rotates the 4 “extras” only
 
-  // Reset offset when the pool changes (new place)
   useEffect(() => { setOffset(0) }, [pool.length, pool[0]?.title])
 
   const visible = useMemo(() => {
@@ -17,7 +16,6 @@ export default function WikiPanel({ state }) {
     const extras = pool.slice(1)
     if (extras.length <= 4) return pool.slice(0, 5)
     const start = offset % extras.length
-    // take 4 extras in a circular way
     const rotated = extras.slice(start, start + 4)
       .concat(start + 4 > extras.length ? extras.slice(0, (start + 4) % extras.length) : [])
       .slice(0, 4)
