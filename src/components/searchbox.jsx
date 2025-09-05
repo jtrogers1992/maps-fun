@@ -21,7 +21,6 @@ export default function SearchBox({ onSelect }) {
 
       el.addEventListener('gmp-select', async ({ placePrediction }) => {
         const place = placePrediction.toPlace()
-        // Request richer fields so we can form exact titles like "Greer, South Carolina"
         await place.fetchFields({
           fields: ['displayName', 'formattedAddress', 'location', 'addressComponents', 'types'],
         })
