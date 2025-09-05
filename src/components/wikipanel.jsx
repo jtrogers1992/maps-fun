@@ -8,21 +8,22 @@ export default function WikiPanel({ state }) {
   const pool = state.pool || []
   const [offset, setOffset] = useState(0) // rotates the 4 “extras” only
 
+  // Reset offset when the pool changes (new place)
   useEffect(() => { setOffset(0) }, [pool.length, pool[0]?.title])
 
   const visible = useMemo(() => {
     if (!pool.length) return []
-    const primary = pool[0]
-    const extras = pool.slice(1)
-    if (extras.length <= 4) return pool.slice(0, 5)
+    const primary = pool.find(x => x._isPrimary)
+    const extras = primary ? pool.filter(x => x !== primary) : pool
+    if (extras.length <= 4) return primary ? [primary, ...extras] : extras.slice(0, 5)
     const start = offset % extras.length
     const rotated = extras.slice(start, start + 4)
       .concat(start + 4 > extras.length ? extras.slice(0, (start + 4) % extras.length) : [])
       .slice(0, 4)
-    return [primary, ...rotated]
+    return primary ? [primary, ...rotated] : rotated
   }, [pool, offset])
 
-  const canCycle = (pool.length - 1) > 4
+  const canCycle = (pool.filter(x => !x._isPrimary).length) > 4
 
   return (
     <>
@@ -41,7 +42,7 @@ export default function WikiPanel({ state }) {
       {visible.length ? (
         <ol className="wiki-list">
           {visible.map((s, idx) => (
-            <li key={s.title} className={idx === 0 ? 'primary' : undefined}>
+            <li key={s.title} className={s._isPrimary ? 'primary' : undefined}>
               <a
                 href={s.content_urls?.desktop?.page || s.url}
                 target="_blank"
@@ -54,7 +55,7 @@ export default function WikiPanel({ state }) {
                 <div className="meta">
                   <div className="title-row">
                     <h3 className="title">
-                      {idx === 0 && <span className="badge">Primary</span>} {s.title}
+                      {s._isPrimary && <span className="badge">Primary</span>} {s.title}
                     </h3>
                     {(s._badge || s.description) && (
                       <span className="tag">{s._badge || s.description}</span>
