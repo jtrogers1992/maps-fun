@@ -5,17 +5,17 @@ import WikiPanel from './components/wikipanel.jsx'
 
 export default function App() {
   const [place, setPlace] = useState(null)
-  const [wiki, setWiki] = useState({ status: 'idle', items: [] })
+  const [wiki, setWiki] = useState({ status: 'idle', pool: [] })
 
   const onPlaceSelected = useCallback(async (p) => {
     setPlace(p)
-    setWiki({ status: 'loading', items: [] })
+    setWiki({ status: 'loading', pool: [] })
     try {
-      const items = await fetchTopWikipediaItems(p)
-      setWiki({ status: 'ready', items })
+      const pool = await buildWikipediaPool(p)
+      setWiki({ status: 'ready', pool })
     } catch (e) {
       console.error(e)
-      setWiki({ status: 'error', items: [] })
+      setWiki({ status: 'error', pool: [] })
     }
   }, [])
 
@@ -45,16 +45,13 @@ async function fetchJSON(url) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
-
 async function fetchSummary(title) {
   const res = await fetch(`${SUMMARY_API}/${encodeURIComponent(title)}`)
   if (!res.ok) return null
   return res.json()
 }
 
-/* ---- NEW: coordinate lookup + distance helpers ---- */
-
-// Get a page's lat/lon via MediaWiki (prop=coordinates)
+// --- Coordinates + distance ---
 async function fetchCoords(title) {
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
@@ -62,7 +59,6 @@ async function fetchCoords(title) {
   url.searchParams.set('titles', title)
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
-  // co stuff is minimal by default; first coord is fine
   const data = await fetchJSON(url)
   const pages = data?.query?.pages || {}
   const first = Object.values(pages)[0]
@@ -72,7 +68,6 @@ async function fetchCoords(title) {
   }
   return null
 }
-
 function haversineKm(a, b) {
   if (!a || !b) return Infinity
   const toRad = (x) => (x * Math.PI) / 180
@@ -81,20 +76,16 @@ function haversineKm(a, b) {
   const dLon = toRad(b.lng - a.lng)
   const lat1 = toRad(a.lat)
   const lat2 = toRad(b.lat)
-  const sinDLat = Math.sin(dLat / 2)
-  const sinDLon = Math.sin(dLon / 2)
-  const h = sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
 }
-
 async function coordsAndDistanceTo(title, origin) {
   const coords = await fetchCoords(title)
   if (!coords) return { coords: null, km: Infinity }
-  const km = haversineKm(origin, coords)
-  return { coords, km }
+  return { coords, km: haversineKm(origin, coords) }
 }
 
-/** Labels for POIs and interesting place types */
+// --- Classification / filters ---
 const BADGE_RULES = [
   { badge: 'Historic district', keys: ['historic district','historic centre','old town','downtown'] },
   { badge: 'Historic house',    keys: ['historic house','mansion','plantation','residence','house ('] },
@@ -121,17 +112,14 @@ const BADGE_RULES = [
   { badge: 'Neighborhood',      keys: ['neighborhood','borough','suburb','quarter','district'] },
   { badge: 'Factory/Mfg',       keys: ['factory','manufacturing plant','assembly plant','automobile manufacturing'] },
 ]
-
 const ADMIN_BADGES = ['County','State/Province','Country']
 const PLACE_CORE = [
   'city','town','village','municipality','census-designated place','borough','district',
   'capital','country','state','province','county','region','commune','civil parish','township','metropolitan'
 ]
-
 function detectBadge(summary) {
   const t = (summary?.title || '').toLowerCase()
   const d = (summary?.description || '').toLowerCase()
-
   for (const rule of BADGE_RULES) {
     if (rule.keys.some(k => t.includes(k) || d.includes(k))) return rule.badge
   }
@@ -141,19 +129,17 @@ function detectBadge(summary) {
   if (PLACE_CORE.some(k => d.includes(k))) return 'Place'
   return null
 }
-
 function isAdmin(summary) {
   const badge = detectBadge(summary)
   return ADMIN_BADGES.includes(badge || '')
 }
-
 function isPlaceOrPOI(summary) {
   if (!summary || summary.type === 'disambiguation') return false
   const badge = detectBadge(summary)
-  // Accept places + POIs, but NOT biographies/companies/etc
   return !!badge && !/actor|actress|company|band|singer|politician|software|film|novel|surname/i.test(summary.description || '')
 }
 
+// --- Search helpers ---
 function titleCandidatesFromAdmin(p) {
   const city = (p.admin?.city || p.name || '').trim()
   const stateLong = (p.admin?.state || '').trim()
@@ -169,7 +155,6 @@ function titleCandidatesFromAdmin(p) {
   if (p.name)            candidates.add(p.name)
   return Array.from(candidates)
 }
-
 async function searchTitles(query, limit = 10) {
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
@@ -181,7 +166,6 @@ async function searchTitles(query, limit = 10) {
   const data = await fetchJSON(url)
   return (data?.query?.search || []).map(s => s.title)
 }
-
 async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
@@ -195,19 +179,18 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
+// --- Primary resolver (city/town/country) with distance sanity ---
 async function resolvePrimary(p) {
   const origin = p.location
   const good = async (s) => {
     if (!s || isAdmin(s)) return false
-    // If primary has coords, ensure it's within 100 km of the origin
-    const { coords, km } = await coordsAndDistanceTo(s.title, origin)
-    return (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province') &&
+    const { km } = await coordsAndDistanceTo(s.title, origin)
+    const badge = detectBadge(s)
+    return (badge === 'Place' || badge === 'Country' || badge === 'State/Province') &&
            (Number.isFinite(km) ? km <= 100 : true)
   }
-
   for (const t of titleCandidatesFromAdmin(p)) {
-    const s = await fetchSummary(t)
-    if (await good(s)) return s
+    const s = await fetchSummary(t); if (await good(s)) return s
   }
   const terms = [
     `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
@@ -216,21 +199,19 @@ async function resolvePrimary(p) {
   for (const q of terms) {
     const titles = await searchTitles(q, 10)
     for (const t of titles) {
-      const s = await fetchSummary(t)
-      if (await good(s)) return s
+      const s = await fetchSummary(t); if (await good(s)) return s
     }
   }
   if (origin) {
     const near = await geoSearch(origin.lat, origin.lng, 20000, 20)
     for (const n of near) {
-      const s = await fetchSummary(n.title)
-      if (await good(s)) return s
+      const s = await fetchSummary(n.title); if (await good(s)) return s
     }
   }
   return null
 }
 
-/** Higher score = more interesting + closer. Admins are excluded from ranking. */
+// --- Scoring ---
 function scoreItem(badge, distKm) {
   const w = new Map(Object.entries({
     'Historic district': 7,
@@ -264,99 +245,88 @@ function scoreItem(badge, distKm) {
   return base + prox
 }
 
-async function fetchAdminEnclosureSummaries(p) {
-  const out = []
-  const tryAdd = async (title) => {
-    if (!title) return
-    const s = await fetchSummary(title)
-    if (s && isAdmin(s)) out.push(s)
-  }
-  const county = p.admin?.county
-  const stateLong = p.admin?.state
-  const stateCode = p.admin?.stateCode
-  const country = p.admin?.country
-
-  if (county && (stateLong || stateCode)) await tryAdd(`${county}, ${stateLong || stateCode}`)
-  if (stateLong) await tryAdd(stateLong)
-  if (country) await tryAdd(country)
-  return out
-}
-
-async function fetchTopWikipediaItems(p) {
-  const maxTotal = 5
-  const seen = new Set()
-  const items = []
+// --- Build the POOL (primary + lots of POIs; admins only as very last resort) ---
+async function buildWikipediaPool(p) {
   const origin = p.location
+  const pool = []
+  const seen = new Set()
 
-  // 1) Primary (city/town/country)
+  // 1) Primary
   const primary = await resolvePrimary(p)
   if (primary) {
     const { km } = await coordsAndDistanceTo(primary.title, origin)
     primary._badge = detectBadge(primary) || 'Place'
     if (Number.isFinite(km)) primary._distKm = km
-    items.push(primary); seen.add(primary.title)
+    pool.push(primary); seen.add(primary.title)
   }
 
-  // 2) Nearby interesting POIs (exclude admin entirely here)
-  let ranked = []
+  // 2) Ranked nearby POIs (exclude admin)
+  const ranked = []
   if (origin) {
-    const near = await geoSearch(origin.lat, origin.lng, 35000, 80)
+    const near = await geoSearch(origin.lat, origin.lng, 35000, 100)
     for (const n of near) {
       if (seen.has(n.title)) continue
       const s = await fetchSummary(n.title)
       if (!isPlaceOrPOI(s) || isAdmin(s)) continue
       const badge = detectBadge(s) || 'Place'
       const distKm = (n.dist ?? 0) / 1000
-      if (distKm > 35) continue   // hard geofence for geosearch items
+      if (distKm > 35) continue
       s._badge = badge
       s._distKm = distKm
       ranked.push({ s, score: scoreItem(badge, distKm) })
-      if (ranked.length >= 50) break
+      if (ranked.length >= 80) break
     }
     ranked.sort((a, b) => b.score - a.score)
   }
-
   for (const r of ranked) {
-    if (items.length >= maxTotal) break
     if (seen.has(r.s.title)) continue
-    items.push(r.s); seen.add(r.s.title)
+    pool.push(r.s); seen.add(r.s.title)
   }
 
-  // 3) If still short, keyword hunts for POIs — now with COORDINATE CHECK
-  if (items.length < maxTotal && origin) {
+  // 3) Keyword fallbacks with geofence (≤ 60 km)
+  if (origin) {
     const city = p.admin?.city || p.name || ''
     const state = p.admin?.state || ''
     const country = p.admin?.country || ''
     const topics = ['museum','park','historic district','university','airport','stadium','lake','dam','waterfall','bridge','mill','theater','zoo','trail']
     for (const topic of topics) {
-      const titles = await searchTitles(`${city} ${state} ${country} ${topic}`, 6)
+      const titles = await searchTitles(`${city} ${state} ${country} ${topic}`, 8)
       for (const t of titles) {
-        if (items.length >= maxTotal) break
         if (seen.has(t)) continue
         const s = await fetchSummary(t)
         if (!isPlaceOrPOI(s) || isAdmin(s)) continue
-        // NEW: fetch coords and filter by radius (e.g., 60 km for keyword fallbacks)
-        const { coords, km } = await coordsAndDistanceTo(t, origin)
-        if (!coords || !Number.isFinite(km) || km > 60) continue
+        const { km } = await coordsAndDistanceTo(t, origin)
+        if (!Number.isFinite(km) || km > 60) continue
         s._badge = detectBadge(s) || 'Place'
         s._distKm = km
-        items.push(s); seen.add(s.title)
+        pool.push(s); seen.add(s.title)
       }
-      if (items.length >= maxTotal) break
     }
   }
 
-  // 4) Absolute last resort: add admin enclosures (county/state/country) to fill to 5
-  if (items.length < maxTotal) {
-    for (const s of await fetchAdminEnclosureSummaries(p)) {
-      if (items.length >= maxTotal) break
-      if (seen.has(s.title)) continue
-      s._badge = detectBadge(s) || 'Place'
-      const { km } = origin ? await coordsAndDistanceTo(s.title, origin) : { km: undefined }
-      if (Number.isFinite(km)) s._distKm = km
-      items.push(s); seen.add(s.title)
+  // 4) Last resort: admin enclosures (to ensure we always have ~something)
+  if (pool.length < 2) {
+    const tryAdd = async (title) => {
+      if (!title || seen.has(title)) return
+      const s = await fetchSummary(title)
+      if (s && isAdmin(s)) {
+        s._badge = detectBadge(s) || 'Place'
+        if (origin) {
+          const { km } = await coordsAndDistanceTo(title, origin)
+          if (Number.isFinite(km)) s._distKm = km
+        }
+        pool.push(s); seen.add(title)
+      }
     }
+    const county = p.admin?.county
+    const stateLong = p.admin?.state
+    const stateCode = p.admin?.stateCode
+    const country = p.admin?.country
+    if (county && (stateLong || stateCode)) await tryAdd(`${county}, ${stateLong || stateCode}`)
+    if (stateLong) await tryAdd(stateLong)
+    if (country) await tryAdd(country)
   }
 
-  return items.slice(0, maxTotal)
+  // Cap the pool (primary + up to ~50 more)
+  return pool.slice(0, 51)
 }
