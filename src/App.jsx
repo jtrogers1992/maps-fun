@@ -69,7 +69,7 @@ async function normalizeTitle(title) {
   return first.title || null
 }
 
-/** Fetch a page summary using a normalized title */
+/** Fetch a page summary using a normalized title (if possible) */
 async function fetchNormalizedSummary(title) {
   const norm = await normalizeTitle(title)
   if (!norm) return null
@@ -230,6 +230,19 @@ async function searchTitles(query, limit = 10) {
   const data = await fetchJSON(url)
   return (data?.query?.search || []).map(s => s.title)
 }
+async function searchNearmatch(query) {
+  const url = new URL(WIKI_API)
+  url.searchParams.set('action', 'query')
+  url.searchParams.set('list', 'search')
+  url.searchParams.set('srsearch', query)
+  url.searchParams.set('srwhat', 'nearmatch')
+  url.searchParams.set('srlimit', '1')
+  url.searchParams.set('format', 'json')
+  url.searchParams.set('origin', '*')
+  const data = await fetchJSON(url)
+  const hit = data?.query?.search?.[0]
+  return hit?.title || null
+}
 async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
@@ -243,48 +256,46 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
-/* ---------- Primary resolver (robust: normalize titles first) ---------- */
+/* ---------- Primary resolver (robust: normalize + near-match + distance if available) ---------- */
 async function resolvePrimary(p) {
   const origin = p.location
 
   const accept = async (s) => {
     if (!s || isAdmin(s)) return false
     if (/^mayor of\b/i.test(s.title)) return false
-
     const badge = detectBadge(s)
     if (!(badge === 'Place' || badge === 'Country' || badge === 'State/Province')) return false
-
-    // Distance sanity only when we can compute it
     const km = await kmFromOrigin(s, origin)
     return !Number.isFinite(km) || km <= 150
   }
 
   // 0) Bare names + pre-comma variant
-  const baseNames = new Set([
-    (p.admin?.city || '').trim(),
-    (p.name || '').trim(),
-  ])
-  for (const n of [...baseNames]) {
-    if (n && n.includes(',')) baseNames.add(n.split(',')[0].trim())
-  }
+  const baseNames = new Set([(p.admin?.city || '').trim(), (p.name || '').trim()])
+  for (const n of [...baseNames]) if (n && n.includes(',')) baseNames.add(n.split(',')[0].trim())
   for (const t of baseNames) {
     if (!t) continue
     const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
     if (await accept(s)) return s
   }
 
-  // 1) Strong formatted candidates → normalize → summary
+  // 1) Near-match on strongest string
+  const strong = `${p.admin?.city || p.name || ''} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim()
+  if (strong) {
+    const nm = await searchNearmatch(strong)
+    if (nm) {
+      const s = await fetchNormalizedSummary(nm) || await fetchSummary(nm)
+      if (await accept(s)) return s
+    }
+  }
+
+  // 2) Other formatted candidates
   for (const t of titleCandidatesFromAdmin(p)) {
     const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
     if (await accept(s)) return s
   }
 
-  // 2) Targeted searches → normalize each hit
-  const terms = [
-    `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
-    `${p.name} city`,
-    `${p.name} municipality`,
-  ]
+  // 3) Generic searches (still normalized)
+  const terms = [`${p.name} city`, `${p.name} municipality`, strong].filter(Boolean)
   for (const q of terms) {
     const titles = await searchTitles(q, 15)
     for (const t of titles) {
@@ -293,7 +304,7 @@ async function resolvePrimary(p) {
     }
   }
 
-  // 3) Proximate fallback from GeoSearch
+  // 4) Nearby fallback
   if (origin) {
     const near = await geoSearch(origin.lat, origin.lng, 25000, 25)
     for (const n of near) {
@@ -336,7 +347,7 @@ function scoreItem(badge, distKm) {
     'Place':             1,
   }))
   const base = w.get(badge || 'Place') ?? 0
-  const prox = Math.max(0, 6 - (distKm ?? 999)) // + up to ~6 if very close
+  const prox = Math.max(0, 6 - (distKm ?? 999))
   return base + prox
 }
 
