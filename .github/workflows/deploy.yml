@@ -27,7 +27,7 @@ jobs:
           node-version: 22
 
       - name: Install
-        run: npm ci
+        run: Install
 
       - name: Build
         run: npm run build
