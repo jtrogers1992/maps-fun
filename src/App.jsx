@@ -85,7 +85,30 @@ async function coordsAndDistanceTo(title, origin) {
   return { coords, km: haversineKm(origin, coords) }
 }
 
-// --- Classification / filters ---
+/** ---- Classification (tightened) ---- */
+
+// Explicitly exclude non-place “meta” pages (offices, elections, lists, agencies, etc.)
+const NON_PLACE_BLOCK = new RegExp(
+  [
+    '\\bmayor\\b','\\bgovernor\\b','\\bminister\\b','\\bpresident\\b','\\bprime minister\\b',
+    '\\bcity council\\b','\\bcounty council\\b','\\bboard of\\b','\\bcommission\\b',
+    '\\bdepartment\\b','\\bagency\\b','\\bauthority\\b','\\badministration\\b',
+    '\\belection\\b','\\breferendum\\b','\\bby-election\\b',
+    '^list of\\b','\\bindex of\\b','\\boutline of\\b','\\btimeline of\\b',
+    '\\bschool district\\b','\\bpolice department\\b','\\bfire department\\b'
+  ].join('|'),
+  'i'
+)
+
+// Does a title look like a place name?
+function titleLooksLikePlace(title = '') {
+  const t = title.trim()
+  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true         // "City, State"
+  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true       // "City (State)"
+  if (/^(city|town|village|municipality) of /i.test(t)) return true // "City of X"
+  return /^[A-Z][a-zA-Z'. -]+$/.test(t)                     // single-name major places
+}
+
 const BADGE_RULES = [
   { badge: 'Historic district', keys: ['historic district','historic centre','old town','downtown'] },
   { badge: 'Historic house',    keys: ['historic house','mansion','plantation','residence','house ('] },
@@ -117,26 +140,35 @@ const PLACE_CORE = [
   'city','town','village','municipality','census-designated place','borough','district',
   'capital','country','state','province','county','region','commune','civil parish','township','metropolitan'
 ]
+
 function detectBadge(summary) {
-  const t = (summary?.title || '').toLowerCase()
+  const title = (summary?.title || '')
+  const t = title.toLowerCase()
   const d = (summary?.description || '').toLowerCase()
+
+  if (NON_PLACE_BLOCK.test(t) || NON_PLACE_BLOCK.test(d)) return null
+
   for (const rule of BADGE_RULES) {
     if (rule.keys.some(k => t.includes(k) || d.includes(k))) return rule.badge
   }
   if (d.includes('county')) return 'County'
   if (d.includes('state') || d.includes('province')) return 'State/Province'
   if (d.includes('country')) return 'Country'
-  if (PLACE_CORE.some(k => d.includes(k))) return 'Place'
+
+  if (titleLooksLikePlace(title) && PLACE_CORE.some(k => d.includes(k))) return 'Place'
   return null
 }
 function isAdmin(summary) {
-  const badge = detectBadge(summary)
-  return ADMIN_BADGES.includes(badge || '')
+  const b = detectBadge(summary)
+  return ADMIN_BADGES.includes(b || '')
 }
 function isPlaceOrPOI(summary) {
   if (!summary || summary.type === 'disambiguation') return false
-  const badge = detectBadge(summary)
-  return !!badge && !/actor|actress|company|band|singer|politician|software|film|novel|surname/i.test(summary.description || '')
+  const title = (summary.title || '')
+  const desc  = (summary.description || '')
+  if (/(actor|actress|company|band|singer|politician|software|film|novel|surname)/i.test(desc)) return false
+  if (NON_PLACE_BLOCK.test(title) || NON_PLACE_BLOCK.test(desc)) return false
+  return !!detectBadge(summary)
 }
 
 // --- Search helpers ---
@@ -179,11 +211,12 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
-// --- Primary resolver (city/town/country) with distance sanity ---
+// --- Primary resolver (city/town/country) with distance sanity + hard block
 async function resolvePrimary(p) {
   const origin = p.location
   const good = async (s) => {
     if (!s || isAdmin(s)) return false
+    if (/^mayor of\b/i.test(s.title)) return false
     const { km } = await coordsAndDistanceTo(s.title, origin)
     const badge = detectBadge(s)
     return (badge === 'Place' || badge === 'Country' || badge === 'State/Province') &&
@@ -245,7 +278,7 @@ function scoreItem(badge, distKm) {
   return base + prox
 }
 
-// --- Build the POOL (primary + lots of POIs; admins only as very last resort) ---
+// --- Build the POOL (primary + lots of POIs; admins only as last resort)
 async function buildWikipediaPool(p) {
   const origin = p.location
   const pool = []
@@ -270,7 +303,7 @@ async function buildWikipediaPool(p) {
       if (!isPlaceOrPOI(s) || isAdmin(s)) continue
       const badge = detectBadge(s) || 'Place'
       const distKm = (n.dist ?? 0) / 1000
-      if (distKm > 35) continue
+      if (distKm > 35) continue // geofence
       s._badge = badge
       s._distKm = distKm
       ranked.push({ s, score: scoreItem(badge, distKm) })
@@ -304,7 +337,7 @@ async function buildWikipediaPool(p) {
     }
   }
 
-  // 4) Last resort: admin enclosures (to ensure we always have ~something)
+  // 4) Last resort: admin enclosures (only if pool is too small)
   if (pool.length < 2) {
     const tryAdd = async (title) => {
       if (!title || seen.has(title)) return
@@ -327,6 +360,5 @@ async function buildWikipediaPool(p) {
     if (country) await tryAdd(country)
   }
 
-  // Cap the pool (primary + up to ~50 more)
   return pool.slice(0, 51)
 }
