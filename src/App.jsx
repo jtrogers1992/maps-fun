@@ -52,7 +52,49 @@ async function fetchSummary(title) {
   return res.json()
 }
 
-/** Labels for POIs and interesting place types (title/description heuristics) */
+/* ---- NEW: coordinate lookup + distance helpers ---- */
+
+// Get a page's lat/lon via MediaWiki (prop=coordinates)
+async function fetchCoords(title) {
+  const url = new URL(WIKI_API)
+  url.searchParams.set('action', 'query')
+  url.searchParams.set('prop', 'coordinates')
+  url.searchParams.set('titles', title)
+  url.searchParams.set('format', 'json')
+  url.searchParams.set('origin', '*')
+  // co stuff is minimal by default; first coord is fine
+  const data = await fetchJSON(url)
+  const pages = data?.query?.pages || {}
+  const first = Object.values(pages)[0]
+  const c = first?.coordinates?.[0]
+  if (c && typeof c.lat === 'number' && typeof c.lon === 'number') {
+    return { lat: c.lat, lng: c.lon }
+  }
+  return null
+}
+
+function haversineKm(a, b) {
+  if (!a || !b) return Infinity
+  const toRad = (x) => (x * Math.PI) / 180
+  const R = 6371
+  const dLat = toRad(b.lat - a.lat)
+  const dLon = toRad(b.lng - a.lng)
+  const lat1 = toRad(a.lat)
+  const lat2 = toRad(b.lat)
+  const sinDLat = Math.sin(dLat / 2)
+  const sinDLon = Math.sin(dLon / 2)
+  const h = sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
+}
+
+async function coordsAndDistanceTo(title, origin) {
+  const coords = await fetchCoords(title)
+  if (!coords) return { coords: null, km: Infinity }
+  const km = haversineKm(origin, coords)
+  return { coords, km }
+}
+
+/** Labels for POIs and interesting place types */
 const BADGE_RULES = [
   { badge: 'Historic district', keys: ['historic district','historic centre','old town','downtown'] },
   { badge: 'Historic house',    keys: ['historic house','mansion','plantation','residence','house ('] },
@@ -108,7 +150,7 @@ function isAdmin(summary) {
 function isPlaceOrPOI(summary) {
   if (!summary || summary.type === 'disambiguation') return false
   const badge = detectBadge(summary)
-  // Accept places + POIs, but NOT biographies/companies/etc; admin allowed only as last-resort
+  // Accept places + POIs, but NOT biographies/companies/etc
   return !!badge && !/actor|actress|company|band|singer|politician|software|film|novel|surname/i.test(summary.description || '')
 }
 
@@ -154,11 +196,18 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
 }
 
 async function resolvePrimary(p) {
-  // Prefer the city/town/country page, not admin units
-  const good = (s) => s && !isAdmin(s) && (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province')
+  const origin = p.location
+  const good = async (s) => {
+    if (!s || isAdmin(s)) return false
+    // If primary has coords, ensure it's within 100 km of the origin
+    const { coords, km } = await coordsAndDistanceTo(s.title, origin)
+    return (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province') &&
+           (Number.isFinite(km) ? km <= 100 : true)
+  }
+
   for (const t of titleCandidatesFromAdmin(p)) {
     const s = await fetchSummary(t)
-    if (good(s)) return s
+    if (await good(s)) return s
   }
   const terms = [
     `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
@@ -168,14 +217,14 @@ async function resolvePrimary(p) {
     const titles = await searchTitles(q, 10)
     for (const t of titles) {
       const s = await fetchSummary(t)
-      if (good(s)) return s
+      if (await good(s)) return s
     }
   }
-  if (p.location) {
-    const near = await geoSearch(p.location.lat, p.location.lng, 20000, 20)
+  if (origin) {
+    const near = await geoSearch(origin.lat, origin.lng, 20000, 20)
     for (const n of near) {
       const s = await fetchSummary(n.title)
-      if (good(s)) return s
+      if (await good(s)) return s
     }
   }
   return null
@@ -237,26 +286,28 @@ async function fetchTopWikipediaItems(p) {
   const maxTotal = 5
   const seen = new Set()
   const items = []
+  const origin = p.location
 
   // 1) Primary (city/town/country)
   const primary = await resolvePrimary(p)
   if (primary) {
+    const { km } = await coordsAndDistanceTo(primary.title, origin)
     primary._badge = detectBadge(primary) || 'Place'
+    if (Number.isFinite(km)) primary._distKm = km
     items.push(primary); seen.add(primary.title)
   }
 
   // 2) Nearby interesting POIs (exclude admin entirely here)
   let ranked = []
-  if (p.location) {
-    const near = await geoSearch(p.location.lat, p.location.lng, 35000, 80)
+  if (origin) {
+    const near = await geoSearch(origin.lat, origin.lng, 35000, 80)
     for (const n of near) {
       if (seen.has(n.title)) continue
       const s = await fetchSummary(n.title)
       if (!isPlaceOrPOI(s) || isAdmin(s)) continue
       const badge = detectBadge(s) || 'Place'
       const distKm = (n.dist ?? 0) / 1000
-      // ignore things too far to feel related
-      if (distKm > 35) continue
+      if (distKm > 35) continue   // hard geofence for geosearch items
       s._badge = badge
       s._distKm = distKm
       ranked.push({ s, score: scoreItem(badge, distKm) })
@@ -271,8 +322,8 @@ async function fetchTopWikipediaItems(p) {
     items.push(r.s); seen.add(r.s.title)
   }
 
-  // 3) If still short, keyword hunts for POIs (still excluding admin)
-  if (items.length < maxTotal) {
+  // 3) If still short, keyword hunts for POIs — now with COORDINATE CHECK
+  if (items.length < maxTotal && origin) {
     const city = p.admin?.city || p.name || ''
     const state = p.admin?.state || ''
     const country = p.admin?.country || ''
@@ -284,7 +335,11 @@ async function fetchTopWikipediaItems(p) {
         if (seen.has(t)) continue
         const s = await fetchSummary(t)
         if (!isPlaceOrPOI(s) || isAdmin(s)) continue
+        // NEW: fetch coords and filter by radius (e.g., 60 km for keyword fallbacks)
+        const { coords, km } = await coordsAndDistanceTo(t, origin)
+        if (!coords || !Number.isFinite(km) || km > 60) continue
         s._badge = detectBadge(s) || 'Place'
+        s._distKm = km
         items.push(s); seen.add(s.title)
       }
       if (items.length >= maxTotal) break
@@ -297,6 +352,8 @@ async function fetchTopWikipediaItems(p) {
       if (items.length >= maxTotal) break
       if (seen.has(s.title)) continue
       s._badge = detectBadge(s) || 'Place'
+      const { km } = origin ? await coordsAndDistanceTo(s.title, origin) : { km: undefined }
+      if (Number.isFinite(km)) s._distKm = km
       items.push(s); seen.add(s.title)
     }
   }
