@@ -3,5 +3,6 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/maps-fun/', // <-- set to your repo name
+  base: '/maps-fun/',   // <-- must match the repo name exactly
 })
+
