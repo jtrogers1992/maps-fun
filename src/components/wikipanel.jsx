@@ -1,5 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react'
 
+function wikiUrl(s) {
+  // Prefer REST-provided URLs, but fall back to canonical /wiki/Title
+  const fromRest =
+    s?.content_urls?.desktop?.page ||
+    s?.content_urls?.mobile?.page ||
+    s?.url
+  if (fromRest) return fromRest
+  if (s?.title) {
+    const slug = encodeURIComponent((s.title || '').replace(/ /g, '_'))
+    return `https://en.wikipedia.org/wiki/${slug}`
+  }
+  return '#'
+}
+
 export default function WikiPanel({ state }) {
   if (state.status === 'idle')    return <p className="muted">Search a place to see Wikipedia results.</p>
   if (state.status === 'loading') return <p className="muted">Loading Wikipedia…</p>
@@ -41,10 +55,10 @@ export default function WikiPanel({ state }) {
 
       {visible.length ? (
         <ol className="wiki-list">
-          {visible.map((s, idx) => (
+          {visible.map((s) => (
             <li key={s.title} className={s._isPrimary ? 'primary' : undefined}>
               <a
-                href={s.content_urls?.desktop?.page || s.url}
+                href={wikiUrl(s)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="wiki-item"
