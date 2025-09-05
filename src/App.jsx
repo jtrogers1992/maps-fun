@@ -52,27 +52,35 @@ async function fetchSummary(title) {
   return res.json()
 }
 
-/** Label detection for “interesting” places/POIs */
+/** Labels for POIs and interesting place types (title/description heuristics) */
 const BADGE_RULES = [
-  { badge: 'Historic district', keys: ['historic district','old town','downtown'] },
-  { badge: 'Museum',            keys: ['museum','gallery'] },
-  { badge: 'Park',              keys: ['national park','state park','park','botanical garden','garden','arboretum'] },
-  { badge: 'University',        keys: ['university','college','institute'] },
-  { badge: 'Airport',           keys: ['airport','airfield'] },
+  { badge: 'Historic district', keys: ['historic district','historic centre','old town','downtown'] },
+  { badge: 'Historic house',    keys: ['historic house','mansion','plantation','residence','house ('] },
+  { badge: 'NRHP site',         keys: ['nrhp','national register of historic places'] },
+  { badge: 'Museum',            keys: ['museum','gallery','zentrum'] },
+  { badge: 'Park',              keys: ['national park','state park','city park','park','arboretum','botanical garden','nature reserve','preserve'] },
+  { badge: 'University',        keys: ['university','college','institute','technical college'] },
+  { badge: 'Airport',           keys: ['airport','airfield','air base','international airport'] },
   { badge: 'Stadium',           keys: ['stadium','arena','ballpark'] },
   { badge: 'Bridge',            keys: ['bridge'] },
+  { badge: 'Waterfall',         keys: ['waterfall'] },
+  { badge: 'Dam',               keys: ['dam'] },
+  { badge: 'Lake',              keys: ['lake','reservoir'] },
   { badge: 'River',             keys: ['river'] },
-  { badge: 'Lake',              keys: ['lake'] },
+  { badge: 'Mill',              keys: ['mill','gristmill','textile mill'] },
+  { badge: 'Theater',           keys: ['theatre','theater','performing arts center','opera house'] },
   { badge: 'Zoo/Aquarium',      keys: ['zoo','aquarium'] },
-  { badge: 'Theater',           keys: ['theatre','theater','opera house'] },
   { badge: 'Religious site',    keys: ['cathedral','church','temple','mosque','synagogue'] },
   { badge: 'Library',           keys: ['library'] },
   { badge: 'Fort/Castle',       keys: ['fort','castle'] },
-  { badge: 'Monument',          keys: ['monument','memorial'] },
+  { badge: 'Monument',          keys: ['monument','memorial','statue','obelisk'] },
   { badge: 'Market',            keys: ['market'] },
+  { badge: 'Trail/Greenway',    keys: ['rail trail','greenway','trail','state trail'] },
   { badge: 'Neighborhood',      keys: ['neighborhood','borough','suburb','quarter','district'] },
+  { badge: 'Factory/Mfg',       keys: ['factory','manufacturing plant','assembly plant','automobile manufacturing'] },
 ]
 
+const ADMIN_BADGES = ['County','State/Province','Country']
 const PLACE_CORE = [
   'city','town','village','municipality','census-designated place','borough','district',
   'capital','country','state','province','county','region','commune','civil parish','township','metropolitan'
@@ -81,22 +89,27 @@ const PLACE_CORE = [
 function detectBadge(summary) {
   const t = (summary?.title || '').toLowerCase()
   const d = (summary?.description || '').toLowerCase()
+
   for (const rule of BADGE_RULES) {
     if (rule.keys.some(k => t.includes(k) || d.includes(k))) return rule.badge
   }
-  // Admin areas:
   if (d.includes('county')) return 'County'
   if (d.includes('state') || d.includes('province')) return 'State/Province'
   if (d.includes('country')) return 'Country'
-  // Generic place:
   if (PLACE_CORE.some(k => d.includes(k))) return 'Place'
   return null
 }
 
-function isPlaceSummary(summary) {
+function isAdmin(summary) {
+  const badge = detectBadge(summary)
+  return ADMIN_BADGES.includes(badge || '')
+}
+
+function isPlaceOrPOI(summary) {
   if (!summary || summary.type === 'disambiguation') return false
-  // Accept if it’s a place/POI (physical location). Reject biographies/companies/etc by omission.
-  return !!detectBadge(summary)
+  const badge = detectBadge(summary)
+  // Accept places + POIs, but NOT biographies/companies/etc; admin allowed only as last-resort
+  return !!badge && !/actor|actress|company|band|singer|politician|software|film|novel|surname/i.test(summary.description || '')
 }
 
 function titleCandidatesFromAdmin(p) {
@@ -127,7 +140,7 @@ async function searchTitles(query, limit = 10) {
   return (data?.query?.search || []).map(s => s.title)
 }
 
-async function geoSearch(lat, lng, radiusM = 20000, limit = 40) {
+async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('list', 'geosearch')
@@ -137,15 +150,15 @@ async function geoSearch(lat, lng, radiusM = 20000, limit = 40) {
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
   const data = await fetchJSON(url)
-  // returns [{title, dist, lat, lon}]
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
 async function resolvePrimary(p) {
+  // Prefer the city/town/country page, not admin units
+  const good = (s) => s && !isAdmin(s) && (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province')
   for (const t of titleCandidatesFromAdmin(p)) {
     const s = await fetchSummary(t)
-    if (isPlaceSummary(s) && (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province'))
-      return s
+    if (good(s)) return s
   }
   const terms = [
     `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
@@ -155,62 +168,60 @@ async function resolvePrimary(p) {
     const titles = await searchTitles(q, 10)
     for (const t of titles) {
       const s = await fetchSummary(t)
-      if (isPlaceSummary(s) && (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province'))
-        return s
+      if (good(s)) return s
     }
   }
   if (p.location) {
-    const near = await geoSearch(p.location.lat, p.location.lng, 15000, 20)
+    const near = await geoSearch(p.location.lat, p.location.lng, 20000, 20)
     for (const n of near) {
       const s = await fetchSummary(n.title)
-      if (isPlaceSummary(s) && (detectBadge(s) === 'Place' || detectBadge(s) === 'Country' || detectBadge(s) === 'State/Province'))
-        return s
+      if (good(s)) return s
     }
   }
   return null
 }
 
-/** Higher score = more interesting + closer */
+/** Higher score = more interesting + closer. Admins are excluded from ranking. */
 function scoreItem(badge, distKm) {
-  const badgeWeights = new Map(Object.entries({
-    'Historic district': 6,
-    'Museum': 6,
-    'Park': 5,
-    'University': 5,
-    'Airport': 4,
-    'Stadium': 4,
-    'Bridge': 4,
-    'River': 3,
-    'Lake': 3,
-    'Zoo/Aquarium': 3,
-    'Theater': 3,
-    'Religious site': 3,
-    'Library': 2,
-    'Fort/Castle': 3,
-    'Monument': 3,
-    'Market': 3,
-    'Neighborhood': 2,
-    'District': 2,
-    'Place': 1,
-    'County': -1,
-    'State/Province': -2,
-    'Country': -3,
+  const w = new Map(Object.entries({
+    'Historic district': 7,
+    'NRHP site':         7,
+    'Museum':            6,
+    'Park':              6,
+    'University':        6,
+    'Stadium':           5,
+    'Airport':           5,
+    'Bridge':            4,
+    'Waterfall':         4,
+    'Dam':               4,
+    'Lake':              4,
+    'River':             3,
+    'Mill':              3,
+    'Theater':           3,
+    'Zoo/Aquarium':      3,
+    'Religious site':    3,
+    'Library':           2,
+    'Fort/Castle':       3,
+    'Monument':          3,
+    'Market':            3,
+    'Trail/Greenway':    3,
+    'Neighborhood':      2,
+    'Historic house':    2,
+    'Factory/Mfg':       2,
+    'Place':             1,
   }))
-  const base = badgeWeights.get(badge || 'Place') ?? 0
-  // proximity bonus: up to +5 within ~5 km, then taper
-  const prox = Math.max(0, 5 - (distKm ?? 999))
+  const base = w.get(badge || 'Place') ?? 0
+  const prox = Math.max(0, 6 - (distKm ?? 999)) // + up to ~6 if very close
   return base + prox
 }
 
 async function fetchAdminEnclosureSummaries(p) {
   const out = []
-
   const tryAdd = async (title) => {
     if (!title) return
     const s = await fetchSummary(title)
-    if (isPlaceSummary(s)) out.push(s)
+    if (s && isAdmin(s)) out.push(s)
   }
-
   const county = p.admin?.county
   const stateLong = p.admin?.state
   const stateCode = p.admin?.stateCode
@@ -219,7 +230,6 @@ async function fetchAdminEnclosureSummaries(p) {
   if (county && (stateLong || stateCode)) await tryAdd(`${county}, ${stateLong || stateCode}`)
   if (stateLong) await tryAdd(stateLong)
   if (country) await tryAdd(country)
-
   return out
 }
 
@@ -235,23 +245,22 @@ async function fetchTopWikipediaItems(p) {
     items.push(primary); seen.add(primary.title)
   }
 
-  // 2) Nearby interesting POIs (ranked)
+  // 2) Nearby interesting POIs (exclude admin entirely here)
   let ranked = []
   if (p.location) {
-    const near = await geoSearch(p.location.lat, p.location.lng, 20000, 60)
-    // Fetch summaries (limited) and score
+    const near = await geoSearch(p.location.lat, p.location.lng, 35000, 80)
     for (const n of near) {
       if (seen.has(n.title)) continue
       const s = await fetchSummary(n.title)
-      if (!isPlaceSummary(s)) continue
+      if (!isPlaceOrPOI(s) || isAdmin(s)) continue
       const badge = detectBadge(s) || 'Place'
       const distKm = (n.dist ?? 0) / 1000
-      const score = scoreItem(badge, distKm)
+      // ignore things too far to feel related
+      if (distKm > 35) continue
       s._badge = badge
       s._distKm = distKm
-      ranked.push({ s, score })
-      // small safety to avoid too many fetches; we likely have enough variety
-      if (ranked.length >= 40) break
+      ranked.push({ s, score: scoreItem(badge, distKm) })
+      if (ranked.length >= 50) break
     }
     ranked.sort((a, b) => b.score - a.score)
   }
@@ -262,41 +271,33 @@ async function fetchTopWikipediaItems(p) {
     items.push(r.s); seen.add(r.s.title)
   }
 
-  // 3) If still short, add enclosing admin areas (de-prioritized)
+  // 3) If still short, keyword hunts for POIs (still excluding admin)
+  if (items.length < maxTotal) {
+    const city = p.admin?.city || p.name || ''
+    const state = p.admin?.state || ''
+    const country = p.admin?.country || ''
+    const topics = ['museum','park','historic district','university','airport','stadium','lake','dam','waterfall','bridge','mill','theater','zoo','trail']
+    for (const topic of topics) {
+      const titles = await searchTitles(`${city} ${state} ${country} ${topic}`, 6)
+      for (const t of titles) {
+        if (items.length >= maxTotal) break
+        if (seen.has(t)) continue
+        const s = await fetchSummary(t)
+        if (!isPlaceOrPOI(s) || isAdmin(s)) continue
+        s._badge = detectBadge(s) || 'Place'
+        items.push(s); seen.add(s.title)
+      }
+      if (items.length >= maxTotal) break
+    }
+  }
+
+  // 4) Absolute last resort: add admin enclosures (county/state/country) to fill to 5
   if (items.length < maxTotal) {
     for (const s of await fetchAdminEnclosureSummaries(p)) {
       if (items.length >= maxTotal) break
       if (seen.has(s.title)) continue
       s._badge = detectBadge(s) || 'Place'
       items.push(s); seen.add(s.title)
-    }
-  }
-
-  // 4) Final fallback: targeted keyword searches (still filtered)
-  const need = maxTotal - items.length
-  if (need > 0) {
-    const city = p.admin?.city || p.name || ''
-    const state = p.admin?.state || ''
-    const country = p.admin?.country || ''
-    const queries = [
-      `${city} ${state} ${country} museum`,
-      `${city} ${state} ${country} park`,
-      `${city} ${state} ${country} historic district`,
-      `${city} ${state} ${country} university`,
-      `${city} ${state} ${country} airport`,
-      `${city} ${state} ${country} stadium`,
-    ]
-    for (const q of queries) {
-      const titles = await searchTitles(q, 5)
-      for (const t of titles) {
-        if (items.length >= maxTotal) break
-        if (seen.has(t)) continue
-        const s = await fetchSummary(t)
-        if (!isPlaceSummary(s)) continue
-        s._badge = detectBadge(s) || 'Place'
-        items.push(s); seen.add(s.title)
-      }
-      if (items.length >= maxTotal) break
     }
   }
 
