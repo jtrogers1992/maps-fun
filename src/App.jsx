@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react'
 import Map from './components/Map.jsx'
-import SearchBox from './components/SearchBox.jsx'
-import WikiPanel from './components/WikiPanel.jsx'
+import SearchBox from './components/searchbox.jsx'
+import WikiPanel from './components/wikipanel.jsx'
 
 export default function App() {
   const [place, setPlace] = useState(null)
