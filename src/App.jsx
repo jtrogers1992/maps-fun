@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react'
 import Map from './components/Map.jsx'
-import SearchBox from './components/searchbox.jsx'
-import WikiPanel from './components/wikipanel.jsx'
+import SearchBox from './components/SearchBox.jsx'
+import WikiPanel from './components/WikiPanel.jsx'
 
 export default function App() {
   const [place, setPlace] = useState(null)
@@ -79,8 +79,7 @@ function haversineKm(a, b) {
   const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
 }
-
-// Prefer coords from the REST summary; only fall back to a second query if missing
+// Prefer coords in the REST summary; fall back to coord query if needed
 async function kmFromOrigin(summary, origin) {
   if (!origin) return Infinity
   const sc = summary?.coordinates
@@ -94,6 +93,7 @@ async function kmFromOrigin(summary, origin) {
 
 /** ---- Classification (tightened) ---- */
 
+// Explicitly exclude non-place “meta” pages (offices, elections, lists, agencies, etc.)
 const NON_PLACE_BLOCK = new RegExp(
   [
     '\\bmayor\\b','\\bgovernor\\b','\\bminister\\b','\\bpresident\\b','\\bprime minister\\b',
@@ -106,11 +106,12 @@ const NON_PLACE_BLOCK = new RegExp(
   'i'
 )
 
+// Does a title look like a place name?
 function titleLooksLikePlace(title = '') {
   const t = title.trim()
-  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true          // "City, State"
-  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true        // "City (State)"
-  if (/^(city|town|village|municipality) of /i.test(t)) return true
+  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true          // "City, State/Country"
+  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true        // "City (State/Country)"
+  if (/^(city|town|village|municipality) of /i.test(t)) return true // "City of X"
   return /^[A-Z][a-zA-Z'. -]+$/.test(t)                      // single-name major places
 }
 
@@ -190,8 +191,7 @@ function titleCandidatesFromAdmin(p) {
   if (city && stateCode) candidates.add(`${city}, ${stateCode}`)
   if (city && country)   candidates.add(`${city}, ${country}`)
   if (p.name)            candidates.add(p.name)
-  // Also try “City of X”
-  if (city) candidates.add(`City of ${city}`)
+  if (city)              candidates.add(`City of ${city}`)
   return Array.from(candidates)
 }
 async function searchTitles(query, limit = 10) {
@@ -218,28 +218,44 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
-// --- Primary resolver (city/town/country) with improved coordinate use
+// --- Primary resolver (city/town/country) — more forgiving on titles/coords
 async function resolvePrimary(p) {
   const origin = p.location
 
-  const qualifiesAsPrimary = async (s) => {
+  const accept = async (s) => {
     if (!s || isAdmin(s)) return false
     if (/^mayor of\b/i.test(s.title)) return false
+
     const badge = detectBadge(s)
     if (!(badge === 'Place' || badge === 'Country' || badge === 'State/Province')) return false
-    // Use summary coords first (more reliable), then fall back
+
+    // If we can compute distance, require it to be sane.
+    // If we can't (missing coords), DON'T reject on that alone.
     const km = await kmFromOrigin(s, origin)
-    // Allow generous radius for big cities in metro areas
-    return !Number.isFinite(km) || km <= 120
+    return !Number.isFinite(km) || km <= 150
   }
 
-  // Strong candidates first
+  // 0) Super-robust pass: raw base names (handles "Chicago" vs "Chicago, Illinois")
+  const baseNames = new Set([
+    (p.admin?.city || '').trim(),
+    (p.name || '').trim(),
+  ])
+  for (const n of [...baseNames]) {
+    if (n && n.includes(',')) baseNames.add(n.split(',')[0].trim())
+  }
+  for (const t of baseNames) {
+    if (!t) continue
+    const s = await fetchSummary(t)
+    if (await accept(s)) return s
+  }
+
+  // 1) Strong formatted candidates ("City, State", "City (State)", "City, Country", "City of X")
   for (const t of titleCandidatesFromAdmin(p)) {
     const s = await fetchSummary(t)
-    if (await qualifiesAsPrimary(s)) return s
+    if (await accept(s)) return s
   }
 
-  // Targeted searches
+  // 2) Targeted searches
   const terms = [
     `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
     `${p.name} city`,
@@ -249,16 +265,16 @@ async function resolvePrimary(p) {
     const titles = await searchTitles(q, 12)
     for (const t of titles) {
       const s = await fetchSummary(t)
-      if (await qualifiesAsPrimary(s)) return s
+      if (await accept(s)) return s
     }
   }
 
-  // Proximate fallback
+  // 3) Proximate fallback from GeoSearch
   if (origin) {
-    const near = await geoSearch(origin.lat, origin.lng, 20000, 20)
+    const near = await geoSearch(origin.lat, origin.lng, 25000, 25)
     for (const n of near) {
       const s = await fetchSummary(n.title)
-      if (await qualifiesAsPrimary(s)) return s
+      if (await accept(s)) return s
     }
   }
 
