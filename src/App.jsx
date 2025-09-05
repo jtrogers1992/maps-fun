@@ -79,15 +79,21 @@ function haversineKm(a, b) {
   const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
 }
-async function coordsAndDistanceTo(title, origin) {
-  const coords = await fetchCoords(title)
-  if (!coords) return { coords: null, km: Infinity }
-  return { coords, km: haversineKm(origin, coords) }
+
+// Prefer coords from the REST summary; only fall back to a second query if missing
+async function kmFromOrigin(summary, origin) {
+  if (!origin) return Infinity
+  const sc = summary?.coordinates
+  if (sc && typeof sc.lat === 'number' && typeof sc.lon === 'number') {
+    return haversineKm(origin, { lat: sc.lat, lng: sc.lon })
+  }
+  const c = await fetchCoords(summary?.title || '')
+  if (!c) return Infinity
+  return haversineKm(origin, c)
 }
 
 /** ---- Classification (tightened) ---- */
 
-// Explicitly exclude non-place “meta” pages (offices, elections, lists, agencies, etc.)
 const NON_PLACE_BLOCK = new RegExp(
   [
     '\\bmayor\\b','\\bgovernor\\b','\\bminister\\b','\\bpresident\\b','\\bprime minister\\b',
@@ -100,13 +106,12 @@ const NON_PLACE_BLOCK = new RegExp(
   'i'
 )
 
-// Does a title look like a place name?
 function titleLooksLikePlace(title = '') {
   const t = title.trim()
-  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true         // "City, State"
-  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true       // "City (State)"
-  if (/^(city|town|village|municipality) of /i.test(t)) return true // "City of X"
-  return /^[A-Z][a-zA-Z'. -]+$/.test(t)                     // single-name major places
+  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true          // "City, State"
+  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true        // "City (State)"
+  if (/^(city|town|village|municipality) of /i.test(t)) return true
+  return /^[A-Z][a-zA-Z'. -]+$/.test(t)                      // single-name major places
 }
 
 const BADGE_RULES = [
@@ -185,6 +190,8 @@ function titleCandidatesFromAdmin(p) {
   if (city && stateCode) candidates.add(`${city}, ${stateCode}`)
   if (city && country)   candidates.add(`${city}, ${country}`)
   if (p.name)            candidates.add(p.name)
+  // Also try “City of X”
+  if (city) candidates.add(`City of ${city}`)
   return Array.from(candidates)
 }
 async function searchTitles(query, limit = 10) {
@@ -211,36 +218,50 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
-// --- Primary resolver (city/town/country) with distance sanity + hard block
+// --- Primary resolver (city/town/country) with improved coordinate use
 async function resolvePrimary(p) {
   const origin = p.location
-  const good = async (s) => {
+
+  const qualifiesAsPrimary = async (s) => {
     if (!s || isAdmin(s)) return false
     if (/^mayor of\b/i.test(s.title)) return false
-    const { km } = await coordsAndDistanceTo(s.title, origin)
     const badge = detectBadge(s)
-    return (badge === 'Place' || badge === 'Country' || badge === 'State/Province') &&
-           (Number.isFinite(km) ? km <= 100 : true)
+    if (!(badge === 'Place' || badge === 'Country' || badge === 'State/Province')) return false
+    // Use summary coords first (more reliable), then fall back
+    const km = await kmFromOrigin(s, origin)
+    // Allow generous radius for big cities in metro areas
+    return !Number.isFinite(km) || km <= 120
   }
+
+  // Strong candidates first
   for (const t of titleCandidatesFromAdmin(p)) {
-    const s = await fetchSummary(t); if (await good(s)) return s
+    const s = await fetchSummary(t)
+    if (await qualifiesAsPrimary(s)) return s
   }
+
+  // Targeted searches
   const terms = [
     `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
     `${p.name} city`,
+    `${p.name} municipality`,
   ]
   for (const q of terms) {
-    const titles = await searchTitles(q, 10)
+    const titles = await searchTitles(q, 12)
     for (const t of titles) {
-      const s = await fetchSummary(t); if (await good(s)) return s
+      const s = await fetchSummary(t)
+      if (await qualifiesAsPrimary(s)) return s
     }
   }
+
+  // Proximate fallback
   if (origin) {
     const near = await geoSearch(origin.lat, origin.lng, 20000, 20)
     for (const n of near) {
-      const s = await fetchSummary(n.title); if (await good(s)) return s
+      const s = await fetchSummary(n.title)
+      if (await qualifiesAsPrimary(s)) return s
     }
   }
+
   return null
 }
 
@@ -284,12 +305,13 @@ async function buildWikipediaPool(p) {
   const pool = []
   const seen = new Set()
 
-  // 1) Primary
+  // 1) Primary (explicitly flagged)
   const primary = await resolvePrimary(p)
   if (primary) {
-    const { km } = await coordsAndDistanceTo(primary.title, origin)
+    const km = await kmFromOrigin(primary, origin)
     primary._badge = detectBadge(primary) || 'Place'
     if (Number.isFinite(km)) primary._distKm = km
+    primary._isPrimary = true
     pool.push(primary); seen.add(primary.title)
   }
 
@@ -328,7 +350,7 @@ async function buildWikipediaPool(p) {
         if (seen.has(t)) continue
         const s = await fetchSummary(t)
         if (!isPlaceOrPOI(s) || isAdmin(s)) continue
-        const { km } = await coordsAndDistanceTo(t, origin)
+        const km = await kmFromOrigin(s, origin)
         if (!Number.isFinite(km) || km > 60) continue
         s._badge = detectBadge(s) || 'Place'
         s._distKm = km
@@ -337,17 +359,15 @@ async function buildWikipediaPool(p) {
     }
   }
 
-  // 4) Last resort: admin enclosures (only if pool is too small)
+  // 4) Last resort: admin enclosures (only if pool is tiny)
   if (pool.length < 2) {
     const tryAdd = async (title) => {
       if (!title || seen.has(title)) return
       const s = await fetchSummary(title)
       if (s && isAdmin(s)) {
         s._badge = detectBadge(s) || 'Place'
-        if (origin) {
-          const { km } = await coordsAndDistanceTo(title, origin)
-          if (Number.isFinite(km)) s._distKm = km
-        }
+        const km = await kmFromOrigin(s, origin)
+        if (Number.isFinite(km)) s._distKm = km
         pool.push(s); seen.add(title)
       }
     }
