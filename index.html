@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Maps + Wikipedia</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #app { display: grid; grid-template-columns: 2fr 1fr; height: 100vh; }
+    #map { width: 100%; height: 100%; }
+    #panel { padding: 16px; overflow: auto; border-left: 1px solid #eee; }
+    .search { position: absolute; top: 12px; left: 12px; z-index: 1; }
+    .search input { width: 320px; max-width: 60vw; padding: 10px 12px; border: 1px solid #ccc; border-radius: 8px; }
+    .wiki { margin-top: 12px; }
+    .wiki h2 { margin: 0 0 8px; font-size: 18px; }
+    .wiki img { max-width: 100%; height: auto; border-radius: 8px; }
+    .muted { color: #666; font-size: 13px; }
+    @media (max-width: 900px) {
+      #app { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+      #panel { border-left: none; border-top: 1px solid #eee; height: 50vh; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div style="position: relative;">
+      <div class="search">
+        <input id="search" placeholder="Search a place..." aria-label="Search a place" />
+      </div>
+      <div id="map" role="region" aria-label="Map"></div>
+    </div>
+    <div id="panel">
+      <h1>Wikipedia</h1>
+      <div id="wiki" class="wiki">
+        <p class="muted">Search a place to see the nearest Wikipedia article.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let map, marker, auto;
+
+    async function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: 41.8781, lng: -87.6298 }, // Chicago default
+        zoom: 12,
+        mapTypeControl: false,
+        streetViewControl: false,
+      });
+
+      const input = document.getElementById("search");
+      auto = new google.maps.places.Autocomplete(input, {
+        fields: ["geometry", "name", "formatted_address", "place_id"],
+      });
+      auto.addListener("place_changed", onPlaceChanged);
+    }
+
+    async function onPlaceChanged() {
+      const place = auto.getPlace();
+      if (!place || !place.geometry || !place.geometry.location) return;
+
+      const loc = place.geometry.location;
+      const lat = loc.lat();
+      const lng = loc.lng();
+
+      if (!marker) marker = new google.maps.Marker({ map });
+      marker.setPosition({ lat, lng });
+      map.panTo({ lat, lng });
+      map.setZoom(14);
+
+      try {
+        const page = await fetchNearestWikipedia(lat, lng);
+        if (page) {
+          const summary = await fetchWikipediaSummary(page.title);
+          renderWiki(summary);
+        } else {
+          renderWiki(null, "No nearby Wikipedia article found.");
+        }
+      } catch (e) {
+        console.error(e);
+        renderWiki(null, "Couldn’t load Wikipedia info.");
+      }
+    }
+
+    async function fetchNearestWikipedia(lat, lng) {
+      const url = new URL("https://en.wikipedia.org/w/api.php");
+      url.searchParams.set("action", "query");
+      url.searchParams.set("list", "geosearch");
+      url.searchParams.set("gscoord", `${lat}|${lng}`);
+      url.searchParams.set("gsradius", "10000");
+      url.searchParams.set("gslimit", "1");
+      url.searchParams.set("format", "json");
+      url.searchParams.set("origin", "*");
+
+      const res = await fetch(url.toString());
+      const data = await res.json();
+      return (data?.query?.geosearch && data.query.geosearch[0]) || null;
+    }
+
+    async function fetchWikipediaSummary(title) {
+      const res = await fetch(
+        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
+      );
+      if (!res.ok) return null;
+      return res.json();
+    }
+
+    function renderWiki(summary, fallbackMsg) {
+      const el = document.getElementById("wiki");
+      if (!summary) {
+        el.innerHTML = `<p class="muted">${fallbackMsg || "No information available."}</p>`;
+        return;
+      }
+      const img = summary.thumbnail?.source
+        ? `<img src="${summary.thumbnail.source}" alt="${summary.title}" />`
+        : "";
+      el.innerHTML = `
+        <h2>${summary.title}</h2>
+        ${img}
+        <p>${summary.extract || "No summary available."}</p>
+        <p><a href="${summary.content_urls?.desktop?.page || summary.url}" target="_blank" rel="noopener">Read on Wikipedia →</a></p>
+      `;
+    }
+
+    window.initMap = initMap;
+  </script>
+
+  <!-- Load Google Maps JS with Places library -->
+  <script
+    src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places&callback=initMap"
+    async
+    defer
+  ></script>
+</body>
+</html>
