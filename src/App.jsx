@@ -47,30 +47,45 @@ async function fetchJSON(url) {
 }
 
 async function fetchSummary(title) {
-  const url = `${SUMMARY_API}/${encodeURIComponent(title)}`
-  const res = await fetch(url)
+  const res = await fetch(`${SUMMARY_API}/${encodeURIComponent(title)}`)
   if (!res.ok) return null
   return res.json()
 }
 
-function looksLikePlace(summary, placeName) {
+// Positive filter: only accept pages that clearly describe places/admin areas.
+function isPlaceSummary(summary) {
   if (!summary || summary.type === 'disambiguation') return false
-  const nameMatch = summary.title?.toLowerCase() === (placeName || '').toLowerCase()
-  const desc = (summary.description || '').toLowerCase()
+  const d = (summary.description || '').toLowerCase()
   const placeHints = [
-    'city', 'town', 'village', 'municipality',
-    'capital', 'country', 'state', 'province',
-    'county', 'district', 'metropolitan'
+    'city','town','village','municipality','capital','country','state','province','county',
+    'district','borough','metropolitan','census-designated place','neighborhood','suburb',
+    'civil parish','commune','region','township'
   ]
-  const hintMatch = placeHints.some(h => desc.includes(h))
-  return nameMatch || hintMatch
+  return placeHints.some(h => d.includes(h))
 }
 
-function parseCountryLike(formattedAddress) {
-  // naive: take last comma-separated segment as country/large region
-  if (!formattedAddress) return ''
-  const parts = formattedAddress.split(',').map(s => s.trim())
-  return parts[parts.length - 1] || ''
+// Build strong title candidates like "Greer, South Carolina" first.
+function titleCandidatesFromAdmin(p) {
+  const city = (p.admin?.city || p.name || '').trim()
+  const stateLong = (p.admin?.state || '').trim()
+  const stateCode = (p.admin?.stateCode || '').trim()
+  const country = (p.admin?.country || '').trim()
+  const candidates = new Set()
+
+  if (city && stateLong) {
+    candidates.add(`${city}, ${stateLong}`)
+    candidates.add(`${city} (${stateLong})`) // some pages use parentheses
+  }
+  if (city && stateCode) {
+    candidates.add(`${city}, ${stateCode}`)
+  }
+  if (city && country) {
+    candidates.add(`${city}, ${country}`)
+  }
+  // Raw display name as a last resort
+  if (p.name) candidates.add(p.name)
+
+  return Array.from(candidates)
 }
 
 async function searchTitles(query, limit = 10) {
@@ -85,7 +100,7 @@ async function searchTitles(query, limit = 10) {
   return (data?.query?.search || []).map(s => s.title)
 }
 
-async function geoSearch(lat, lng, radiusM = 20000, limit = 20) {
+async function geoSearchTitles(lat, lng, radiusM = 20000, limit = 30) {
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('list', 'geosearch')
@@ -95,81 +110,106 @@ async function geoSearch(lat, lng, radiusM = 20000, limit = 20) {
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
   const data = await fetchJSON(url)
-  return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
+  return (data?.query?.geosearch || []).map(g => g.title)
 }
 
-async function resolvePrimary(placeName, formattedAddress) {
-  // 1) Try exact title first
-  const direct = await fetchSummary(placeName)
-  if (looksLikePlace(direct, placeName)) return direct
-
-  // 2) Try search with a country/region hint
-  const hint = parseCountryLike(formattedAddress)
-  const queries = [
-    `${placeName} ${hint}`.trim(),
-    placeName
+async function resolvePrimary(p) {
+  // Try exact, strong candidates first
+  for (const t of titleCandidatesFromAdmin(p)) {
+    const s = await fetchSummary(t)
+    if (isPlaceSummary(s)) return s
+  }
+  // Then try search constrained by city/state/country words
+  const terms = [
+    `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
+    `${p.name} city`,
   ]
-
-  for (const q of queries) {
+  for (const q of terms) {
     const titles = await searchTitles(q, 10)
     for (const t of titles) {
       const s = await fetchSummary(t)
-      if (looksLikePlace(s, placeName)) return s
+      if (isPlaceSummary(s)) return s
     }
   }
-
-  // 3) Give up (caller will fall back to geosearch)
+  // Finally, nearest geosearch page that is a place
+  if (p.location) {
+    const titles = await geoSearchTitles(p.location.lat, p.location.lng, 15000, 20)
+    for (const t of titles) {
+      const s = await fetchSummary(t)
+      if (isPlaceSummary(s)) return s
+    }
+  }
   return null
 }
 
-async function fetchTopWikipediaItems(p) {
-  const { lat, lng } = p.location
-  const placeName = p.name || ''
-  const formattedAddress = p.address || ''
-  const maxTotal = 5
+async function fetchAdminEnclosureSummaries(p) {
+  // Try to include county, state/province, and country pages (place-only).
+  const out = []
 
-  // Find "primary" (the actual city/town/country page)
-  let primary = await resolvePrimary(placeName, formattedAddress)
-
-  // Nearby pages
-  const nearby = await geoSearch(lat, lng, 20000, 30) // 20km radius
-  const titles = nearby.map(n => n.title)
-
-  // Ensure primary exists; if not, pick the nearest as a fallback
-  if (!primary) {
-    if (titles.length > 0) {
-      primary = await fetchSummary(titles[0])
-    }
+  const tryAdd = async (title) => {
+    if (!title) return
+    const s = await fetchSummary(title)
+    if (isPlaceSummary(s)) out.push(s)
   }
 
-  // Build the rest of the list: take distinct titles excluding primary
+  const county = p.admin?.county
+  const stateLong = p.admin?.state
+  const stateCode = p.admin?.stateCode
+  const country = p.admin?.country
+
+  // County pages are usually "X County, Y"
+  if (county && (stateLong || stateCode)) {
+    await tryAdd(`${county}, ${stateLong || stateCode}`)
+  }
+  // State/province page
+  if (stateLong) await tryAdd(stateLong)
+  // Country page
+  if (country) await tryAdd(country)
+
+  return out
+}
+
+async function fetchTopWikipediaItems(p) {
+  const maxTotal = 5
   const seen = new Set()
   const items = []
 
+  // 1) Primary (the exact city/town/country page)
+  const primary = await resolvePrimary(p)
   if (primary) {
-    seen.add(primary.title)
     items.push(primary)
+    seen.add(primary.title)
   }
 
-  for (const t of titles) {
+  // 2) Enclosing admin areas (county, state, country) — filtered to place pages only
+  for (const s of await fetchAdminEnclosureSummaries(p)) {
     if (items.length >= maxTotal) break
-    if (seen.has(t)) continue
-    const s = await fetchSummary(t)
-    if (!s || s.type === 'disambiguation') continue
-    seen.add(t)
-    items.push(s)
+    if (seen.has(s.title)) continue
+    items.push(s); seen.add(s.title)
   }
 
-  // If we still have fewer than 5, pad with search titles about the place name
-  if (items.length < maxTotal) {
-    const extras = await searchTitles(`${placeName} ${parseCountryLike(formattedAddress)}`, 10)
-    for (const t of extras) {
+  // 3) Nearby place pages via geosearch (filter to place-only)
+  if (p.location && items.length < maxTotal) {
+    const titles = await geoSearchTitles(p.location.lat, p.location.lng, 20000, 40)
+    for (const t of titles) {
       if (items.length >= maxTotal) break
       if (seen.has(t)) continue
       const s = await fetchSummary(t)
-      if (!s || s.type === 'disambiguation') continue
-      seen.add(t)
-      items.push(s)
+      if (!isPlaceSummary(s)) continue
+      items.push(s); seen.add(t)
+    }
+  }
+
+  // 4) As a final fallback, keyword search constrained to the place terms, still filtered
+  if (items.length < maxTotal) {
+    const q = `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim()
+    const titles = await searchTitles(q, 15)
+    for (const t of titles) {
+      if (items.length >= maxTotal) break
+      if (seen.has(t)) continue
+      const s = await fetchSummary(t)
+      if (!isPlaceSummary(s)) continue
+      items.push(s); seen.add(t)
     }
   }
 
