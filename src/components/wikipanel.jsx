@@ -2,7 +2,7 @@ import React from 'react'
 
 export default function WikiPanel({ state }) {
   if (state.status === 'idle') {
-    return <p className="muted">Search a place to see the nearest Wikipedia article.</p>
+    return <p className="muted">Search a place to see Wikipedia results.</p>
   }
   if (state.status === 'loading') {
     return <p className="muted">Loading Wikipedia…</p>
@@ -10,28 +10,35 @@ export default function WikiPanel({ state }) {
   if (state.status === 'error') {
     return <p className="muted">Couldn’t load Wikipedia info.</p>
   }
-  if (state.status === 'empty') {
-    return <p className="muted">No nearby Wikipedia article found.</p>
+  const items = state.items || []
+  if (!items.length) {
+    return <p className="muted">No articles found.</p>
   }
-  const summary = state.data
-  if (!summary) return <p className="muted">No information available.</p>
 
   return (
-    <div className="wiki">
-      <h2>{summary.title}</h2>
-      {summary.thumbnail?.source && (
-        <img src={summary.thumbnail.source} alt={summary.title} />
-      )}
-      <p>{summary.extract || 'No summary available.'}</p>
-      <p>
-        <a
-          href={summary.content_urls?.desktop?.page || summary.url}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Read on Wikipedia →
-        </a>
-      </p>
-    </div>
+    <ol className="wiki-list">
+      {items.map((s, idx) => (
+        <li key={s.title} className={idx === 0 ? 'primary' : undefined}>
+          <a
+            href={s.content_urls?.desktop?.page || s.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="wiki-item"
+          >
+            {s.thumbnail?.source && (
+              <img src={s.thumbnail.source} alt={s.title} className="thumb" />
+            )}
+            <div className="meta">
+              <div className="title-row">
+                <h3 className="title">
+                  {idx === 0 && <span className="badge">Primary</span>} {s.title}
+                </h3>
+              </div>
+              <p className="desc">{s.extract || s.description || 'No summary available.'}</p>
+            </div>
+          </a>
+        </li>
+      ))}
+    </ol>
   )
 }
