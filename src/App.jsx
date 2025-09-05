@@ -46,9 +46,34 @@ async function fetchJSON(url) {
   return res.json()
 }
 async function fetchSummary(title) {
+  if (!title) return null
   const res = await fetch(`${SUMMARY_API}/${encodeURIComponent(title)}`)
   if (!res.ok) return null
   return res.json()
+}
+
+/** Normalize a title via MediaWiki redirects/normalization → canonical title */
+async function normalizeTitle(title) {
+  if (!title) return null
+  const url = new URL(WIKI_API)
+  url.searchParams.set('action', 'query')
+  url.searchParams.set('format', 'json')
+  url.searchParams.set('origin', '*')
+  url.searchParams.set('redirects', '1')
+  url.searchParams.set('converttitles', '1')
+  url.searchParams.set('titles', title)
+  const data = await fetchJSON(url)
+  const pages = data?.query?.pages || {}
+  const first = Object.values(pages)[0]
+  if (!first || first.missing) return null
+  return first.title || null
+}
+
+/** Fetch a page summary using a normalized title */
+async function fetchNormalizedSummary(title) {
+  const norm = await normalizeTitle(title)
+  if (!norm) return null
+  return fetchSummary(norm)
 }
 
 // --- Coordinates + distance ---
@@ -218,7 +243,7 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
-// --- Primary resolver (city/town/country) — more forgiving on titles/coords
+/* ---------- Primary resolver (robust: normalize titles first) ---------- */
 async function resolvePrimary(p) {
   const origin = p.location
 
@@ -229,13 +254,12 @@ async function resolvePrimary(p) {
     const badge = detectBadge(s)
     if (!(badge === 'Place' || badge === 'Country' || badge === 'State/Province')) return false
 
-    // If we can compute distance, require it to be sane.
-    // If we can't (missing coords), DON'T reject on that alone.
+    // Distance sanity only when we can compute it
     const km = await kmFromOrigin(s, origin)
     return !Number.isFinite(km) || km <= 150
   }
 
-  // 0) Super-robust pass: raw base names (handles "Chicago" vs "Chicago, Illinois")
+  // 0) Bare names + pre-comma variant
   const baseNames = new Set([
     (p.admin?.city || '').trim(),
     (p.name || '').trim(),
@@ -245,26 +269,26 @@ async function resolvePrimary(p) {
   }
   for (const t of baseNames) {
     if (!t) continue
-    const s = await fetchSummary(t)
+    const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
     if (await accept(s)) return s
   }
 
-  // 1) Strong formatted candidates ("City, State", "City (State)", "City, Country", "City of X")
+  // 1) Strong formatted candidates → normalize → summary
   for (const t of titleCandidatesFromAdmin(p)) {
-    const s = await fetchSummary(t)
+    const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
     if (await accept(s)) return s
   }
 
-  // 2) Targeted searches
+  // 2) Targeted searches → normalize each hit
   const terms = [
     `${p.admin?.city || p.name} ${p.admin?.state || ''} ${p.admin?.country || ''}`.trim(),
     `${p.name} city`,
     `${p.name} municipality`,
   ]
   for (const q of terms) {
-    const titles = await searchTitles(q, 12)
+    const titles = await searchTitles(q, 15)
     for (const t of titles) {
-      const s = await fetchSummary(t)
+      const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
       if (await accept(s)) return s
     }
   }
@@ -273,7 +297,7 @@ async function resolvePrimary(p) {
   if (origin) {
     const near = await geoSearch(origin.lat, origin.lng, 25000, 25)
     for (const n of near) {
-      const s = await fetchSummary(n.title)
+      const s = await fetchNormalizedSummary(n.title) || await fetchSummary(n.title)
       if (await accept(s)) return s
     }
   }
@@ -281,7 +305,8 @@ async function resolvePrimary(p) {
   return null
 }
 
-// --- Scoring ---
+/* ----------------- Scoring & pool building ----------------- */
+
 function scoreItem(badge, distKm) {
   const w = new Map(Object.entries({
     'Historic district': 7,
@@ -315,7 +340,6 @@ function scoreItem(badge, distKm) {
   return base + prox
 }
 
-// --- Build the POOL (primary + lots of POIs; admins only as last resort)
 async function buildWikipediaPool(p) {
   const origin = p.location
   const pool = []
@@ -337,7 +361,7 @@ async function buildWikipediaPool(p) {
     const near = await geoSearch(origin.lat, origin.lng, 35000, 100)
     for (const n of near) {
       if (seen.has(n.title)) continue
-      const s = await fetchSummary(n.title)
+      const s = await fetchNormalizedSummary(n.title) || await fetchSummary(n.title)
       if (!isPlaceOrPOI(s) || isAdmin(s)) continue
       const badge = detectBadge(s) || 'Place'
       const distKm = (n.dist ?? 0) / 1000
@@ -364,7 +388,7 @@ async function buildWikipediaPool(p) {
       const titles = await searchTitles(`${city} ${state} ${country} ${topic}`, 8)
       for (const t of titles) {
         if (seen.has(t)) continue
-        const s = await fetchSummary(t)
+        const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
         if (!isPlaceOrPOI(s) || isAdmin(s)) continue
         const km = await kmFromOrigin(s, origin)
         if (!Number.isFinite(km) || km > 60) continue
@@ -379,7 +403,7 @@ async function buildWikipediaPool(p) {
   if (pool.length < 2) {
     const tryAdd = async (title) => {
       if (!title || seen.has(title)) return
-      const s = await fetchSummary(title)
+      const s = await fetchNormalizedSummary(title) || await fetchSummary(title)
       if (s && isAdmin(s)) {
         s._badge = detectBadge(s) || 'Place'
         const km = await kmFromOrigin(s, origin)
