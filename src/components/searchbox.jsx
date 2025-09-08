@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react'
+import * as React from 'react'
+const { useEffect, useRef } = React
 import { Loader } from '@googlemaps/js-api-loader'
 
 export default function SearchBox(props) {
