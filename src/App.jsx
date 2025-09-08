@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react'
+import React, { useCallback, useState, useEffect } from 'react'
 import Map from './components/Map.jsx'
 import SearchBox from './components/searchbox.jsx'
 import WikiPanel from './components/wikipanel.jsx'
@@ -6,6 +6,18 @@ import WikiPanel from './components/wikipanel.jsx'
 export default function App() {
   const [place, setPlace] = useState(null)
   const [wiki, setWiki] = useState({ status: 'idle', pool: [] })
+  
+  // Debug effect to log wiki state changes
+  useEffect(() => {
+    if (wiki.status === 'ready') {
+      console.log('Wiki state updated:', {
+        status: wiki.status,
+        poolSize: wiki.pool.length,
+        hasPrimary: !!wiki.pool.find(x => x._isPrimary),
+        primaryTitle: wiki.pool.find(x => x._isPrimary)?.title || 'None'
+      })
+    }
+  }, [wiki])
 
   const onPlaceSelected = useCallback(async (p) => {
     setPlace(p)
@@ -194,12 +206,41 @@ function isAdmin(summary) {
   return ADMIN_BADGES.includes(b || '')
 }
 function isPlaceOrPOI(summary) {
-  if (!summary || summary.type === 'disambiguation') return false
+  if (!summary) {
+    console.log('isPlaceOrPOI: Rejected null summary');
+    return false;
+  }
+  if (summary.type === 'disambiguation') {
+    console.log('isPlaceOrPOI: Rejected disambiguation page:', summary.title);
+    return false;
+  }
+  
   const title = (summary.title || '')
   const desc  = (summary.description || '')
-  if (/(actor|actress|company|band|singer|politician|software|film|novel|surname)/i.test(desc)) return false
-  if (NON_PLACE_BLOCK.test(title) || NON_PLACE_BLOCK.test(desc)) return false
-  return !!detectBadge(summary)
+  
+  if (/(actor|actress|company|band|singer|politician|software|film|novel|surname)/i.test(desc)) {
+    console.log('isPlaceOrPOI: Rejected person/media:', summary.title, '-', desc);
+    return false;
+  }
+  
+  if (NON_PLACE_BLOCK.test(title) || NON_PLACE_BLOCK.test(desc)) {
+    console.log('isPlaceOrPOI: Rejected by NON_PLACE_BLOCK:', summary.title);
+    return false;
+  }
+  
+  const badge = detectBadge(summary);
+  const result = !!badge;
+  
+  if (!result) {
+    console.log('isPlaceOrPOI: No badge detected for:', summary.title, '-', desc);
+    // If it looks like a place name but didn't get a badge, let's accept it anyway
+    if (titleLooksLikePlace(title)) {
+      console.log('isPlaceOrPOI: But title looks like a place, accepting:', title);
+      return true;
+    }
+  }
+  
+  return result;
 }
 
 // --- Search helpers ---
@@ -259,14 +300,37 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
 /* ---------- Primary resolver (robust: normalize + near-match + distance if available) ---------- */
 async function resolvePrimary(p) {
   const origin = p.location
+  console.log('Resolving primary for:', p.name, p.admin?.city, origin)
 
   const accept = async (s) => {
-    if (!s || isAdmin(s)) return false
-    if (/^mayor of\b/i.test(s.title)) return false
+    if (!s) {
+      console.log('Rejected: null summary')
+      return false
+    }
+    if (isAdmin(s)) {
+      console.log('Rejected:', s.title, '- is admin')
+      return false
+    }
+    if (/^mayor of\b/i.test(s.title)) {
+      console.log('Rejected:', s.title, '- mayor pattern')
+      return false
+    }
     const badge = detectBadge(s)
-    if (!(badge === 'Place' || badge === 'Country' || badge === 'State/Province')) return false
+    // Accept more badge types, especially for cities and places
+    const validBadges = ['Place', 'Country', 'State/Province', 'County', 'Neighborhood']
+    if (!validBadges.includes(badge)) {
+      // If the title looks like a place name, accept it regardless of badge
+      if (titleLooksLikePlace(s.title)) {
+        console.log('Accepted despite badge:', s.title, '- title looks like a place')
+        return true
+      }
+      console.log('Rejected:', s.title, '- badge is', badge)
+      return false
+    }
     const km = await kmFromOrigin(s, origin)
-    return !Number.isFinite(km) || km <= 150
+    const result = !Number.isFinite(km) || km <= 150
+    if (!result) console.log('Rejected:', s.title, '- distance is', km, 'km')
+    return result
   }
 
   // 0) Bare names + pre-comma variant
@@ -355,15 +419,18 @@ async function buildWikipediaPool(p) {
   const origin = p.location
   const pool = []
   const seen = new Set()
+  console.log('Building Wikipedia pool for:', p.name, p.admin?.city)
 
   // 1) Primary (explicitly flagged)
   const primary = await resolvePrimary(p)
+  console.log('Primary article found:', primary ? primary.title : 'None')
   if (primary) {
     const km = await kmFromOrigin(primary, origin)
     primary._badge = detectBadge(primary) || 'Place'
     if (Number.isFinite(km)) primary._distKm = km
     primary._isPrimary = true
     pool.push(primary); seen.add(primary.title)
+    console.log('Added primary article to pool:', primary.title, 'with badge:', primary._badge)
   }
 
   // 2) Ranked nearby POIs (exclude admin)
@@ -431,5 +498,7 @@ async function buildWikipediaPool(p) {
     if (country) await tryAdd(country)
   }
 
-  return pool.slice(0, 51)
+  const result = pool.slice(0, 51)
+  console.log('Final pool size:', result.length, 'Primary article included:', !!result.find(x => x._isPrimary))
+  return result
 }
