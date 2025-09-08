@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from 'react'
+import React, { useCallback, useState, useEffect } from 'react'
 import Map from './components/Map.jsx'
 import SearchBox from './components/searchbox.jsx'
 import WikiPanel from './components/wikipanel.jsx'
@@ -20,13 +20,6 @@ export default function App() {
   }, [wiki])
 
   const onPlaceSelected = useCallback(async (p) => {
-    // Ensure we have a valid place with a location
-    if (!p || !p.location) {
-      console.error('Invalid place or missing location')
-      setWiki({ status: 'error', pool: [] })
-      return
-    }
-    
     setPlace(p)
     setWiki({ status: 'loading', pool: [] })
     try {
@@ -59,59 +52,21 @@ export default function App() {
 const WIKI_API = 'https://en.wikipedia.org/w/api.php'
 const SUMMARY_API = 'https://en.wikipedia.org/api/rest_v1/page/summary'
 
-// Add caching to reduce API calls
-const apiCache = new Map();
-
 async function fetchJSON(url) {
-  // Check cache first
-  if (apiCache.has(url)) {
-    return apiCache.get(url);
-  }
-  
   const res = await fetch(url)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = await res.json();
-  
-  // Cache the result
-  apiCache.set(url, data);
-  return data;
+  return res.json()
 }
-
 async function fetchSummary(title) {
-  if (!title) return null;
-  
-  // Create a cache key
-  const cacheKey = `summary:${title}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
+  if (!title) return null
   const res = await fetch(`${SUMMARY_API}/${encodeURIComponent(title)}`)
-  if (!res.ok) {
-    // Cache negative results too
-    apiCache.set(cacheKey, null);
-    return null;
-  }
-  
-  const data = await res.json();
-  apiCache.set(cacheKey, data);
-  return data;
+  if (!res.ok) return null
+  return res.json()
 }
 
 /** Normalize a title via MediaWiki redirects/normalization → canonical title */
 async function normalizeTitle(title) {
   if (!title) return null
-  
-  // Create a cache key
-  const cacheKey = `normalize:${title}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('format', 'json')
@@ -119,82 +74,37 @@ async function normalizeTitle(title) {
   url.searchParams.set('redirects', '1')
   url.searchParams.set('converttitles', '1')
   url.searchParams.set('titles', title)
-  
-  try {
-    const data = await fetchJSON(url)
-    const pages = data?.query?.pages || {}
-    const first = Object.values(pages)[0]
-    if (!first || first.missing) {
-      apiCache.set(cacheKey, null);
-      return null;
-    }
-    const normalizedTitle = first.title || null;
-    apiCache.set(cacheKey, normalizedTitle);
-    return normalizedTitle;
-  } catch (e) {
-    console.error('Error normalizing title:', e);
-    return null;
-  }
+  const data = await fetchJSON(url)
+  const pages = data?.query?.pages || {}
+  const first = Object.values(pages)[0]
+  if (!first || first.missing) return null
+  return first.title || null
 }
 
 /** Fetch a page summary using a normalized title (if possible) */
 async function fetchNormalizedSummary(title) {
-  // Create a cache key
-  const cacheKey = `normalizedSummary:${title}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
   const norm = await normalizeTitle(title)
-  if (!norm) {
-    apiCache.set(cacheKey, null);
-    return null;
-  }
-  
-  const summary = await fetchSummary(norm);
-  apiCache.set(cacheKey, summary);
-  return summary;
+  if (!norm) return null
+  return fetchSummary(norm)
 }
 
 // --- Coordinates + distance ---
 async function fetchCoords(title) {
-  if (!title) return null;
-  
-  // Create a cache key
-  const cacheKey = `coords:${title}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('prop', 'coordinates')
   url.searchParams.set('titles', title)
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
-  
-  try {
-    const data = await fetchJSON(url)
-    const pages = data?.query?.pages || {}
-    const first = Object.values(pages)[0]
-    const c = first?.coordinates?.[0]
-    if (c && typeof c.lat === 'number' && typeof c.lon === 'number') {
-      const coords = { lat: c.lat, lng: c.lon };
-      apiCache.set(cacheKey, coords);
-      return coords;
-    }
-    apiCache.set(cacheKey, null);
-    return null;
-  } catch (e) {
-    console.error('Error fetching coordinates:', e);
-    return null;
+  const data = await fetchJSON(url)
+  const pages = data?.query?.pages || {}
+  const first = Object.values(pages)[0]
+  const c = first?.coordinates?.[0]
+  if (c && typeof c.lat === 'number' && typeof c.lon === 'number') {
+    return { lat: c.lat, lng: c.lon }
   }
+  return null
 }
-
 function haversineKm(a, b) {
   if (!a || !b) return Infinity
   const toRad = (x) => (x * Math.PI) / 180
@@ -206,35 +116,16 @@ function haversineKm(a, b) {
   const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
 }
-
 // Prefer coords in the REST summary; fall back to coord query if needed
 async function kmFromOrigin(summary, origin) {
-  if (!origin || !summary) return Infinity;
-  
-  // Create a cache key
-  const cacheKey = `distance:${summary.title}:${origin.lat},${origin.lng}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
-  let distance = Infinity;
-  
-  // Try coordinates from summary first
-  const sc = summary?.coordinates;
+  if (!origin) return Infinity
+  const sc = summary?.coordinates
   if (sc && typeof sc.lat === 'number' && typeof sc.lon === 'number') {
-    distance = haversineKm(origin, { lat: sc.lat, lng: sc.lon });
-  } else {
-    // Fall back to fetching coordinates
-    const c = await fetchCoords(summary?.title || '');
-    if (c) {
-      distance = haversineKm(origin, c);
-    }
+    return haversineKm(origin, { lat: sc.lat, lng: sc.lon })
   }
-  
-  apiCache.set(cacheKey, distance);
-  return distance;
+  const c = await fetchCoords(summary?.title || '')
+  if (!c) return Infinity
+  return haversineKm(origin, c)
 }
 
 /** ---- Classification (tightened) ---- */
@@ -456,18 +347,7 @@ function titleCandidatesFromAdmin(p) {
   if (city)              candidates.add(`City of ${city}`)
   return Array.from(candidates)
 }
-
 async function searchTitles(query, limit = 10) {
-  if (!query) return [];
-  
-  // Create a cache key
-  const cacheKey = `search:${query}:${limit}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('list', 'search')
@@ -475,59 +355,23 @@ async function searchTitles(query, limit = 10) {
   url.searchParams.set('srlimit', String(limit))
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
-  
-  try {
-    const data = await fetchJSON(url)
-    const titles = (data?.query?.search || []).map(r => r.title);
-    apiCache.set(cacheKey, titles);
-    return titles;
-  } catch (e) {
-    console.error('Error searching titles:', e);
-    return [];
-  }
+  const data = await fetchJSON(url)
+  return (data?.query?.search || []).map(s => s.title)
 }
-
 async function searchNearmatch(query) {
-  if (!query) return null;
-  
-  // Create a cache key
-  const cacheKey = `nearmatch:${query}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('list', 'search')
   url.searchParams.set('srsearch', query)
+  url.searchParams.set('srwhat', 'nearmatch')
   url.searchParams.set('srlimit', '1')
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
-  
-  try {
-    const data = await fetchJSON(url)
-    const title = data?.query?.search?.[0]?.title || null;
-    apiCache.set(cacheKey, title);
-    return title;
-  } catch (e) {
-    console.error('Error finding nearmatch:', e);
-    return null;
-  }
+  const data = await fetchJSON(url)
+  const hit = data?.query?.search?.[0]
+  return hit?.title || null
 }
-
 async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
-  if (!lat || !lng) return [];
-  
-  // Create a cache key
-  const cacheKey = `geo:${lat},${lng}:${radiusM}:${limit}`;
-  
-  // Check cache first
-  if (apiCache.has(cacheKey)) {
-    return apiCache.get(cacheKey);
-  }
-  
   const url = new URL(WIKI_API)
   url.searchParams.set('action', 'query')
   url.searchParams.set('list', 'geosearch')
@@ -536,16 +380,8 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
   url.searchParams.set('gslimit', String(limit))
   url.searchParams.set('format', 'json')
   url.searchParams.set('origin', '*')
-  
-  try {
-    const data = await fetchJSON(url)
-    const results = data?.query?.geosearch || [];
-    apiCache.set(cacheKey, results);
-    return results;
-  } catch (e) {
-    console.error('Error in geosearch:', e);
-    return [];
-  }
+  const data = await fetchJSON(url)
+  return (data?.query?.geosearch || []).map(g => ({ title: g.title, dist: g.dist }))
 }
 
 /* ---------- Primary resolver (robust: normalize + near-match + distance if available) ---------- */
@@ -700,11 +536,6 @@ function scoreItem(badge, distKm) {
 }
 
 async function buildWikipediaPool(p) {
-  if (!p || !p.location) {
-    console.error('Cannot build Wikipedia pool: Invalid place or missing location')
-    return []
-  }
-  
   const origin = p.location
   const pool = []
   const seen = new Set()
@@ -874,36 +705,18 @@ async function buildWikipediaPool(p) {
   // 2) Ranked nearby POIs (exclude admin)
   const ranked = []
   if (origin) {
-    const near = await geoSearch(origin.lat, origin.lng, 35000, 50) // Reduced limit for better performance
-    
-    // Process in batches to avoid overwhelming the API
-    const batchSize = 5;
-    for (let i = 0; i < near.length; i += batchSize) {
-      const batch = near.slice(i, i + batchSize);
-      const promises = batch.map(async (n) => {
-        if (seen.has(n.title)) return null;
-        
-        const s = await fetchNormalizedSummary(n.title) || await fetchSummary(n.title);
-        if (!s || !isPlaceOrPOI(s) || isAdmin(s)) return null;
-        
-        const badge = detectBadge(s) || 'Place';
-        const distKm = (n.dist ?? 0) / 1000;
-        if (distKm > 35) return null; // geofence
-        
-        s._badge = badge;
-        s._distKm = distKm;
-        return { s, score: scoreItem(badge, distKm) };
-      });
-      
-      const results = await Promise.all(promises);
-      for (const result of results) {
-        if (result) {
-          ranked.push(result);
-          seen.add(result.s.title);
-        }
-      }
-      
-      if (ranked.length >= 40) break; // Reduced limit for better performance
+    const near = await geoSearch(origin.lat, origin.lng, 35000, 100)
+    for (const n of near) {
+      if (seen.has(n.title)) continue
+      const s = await fetchNormalizedSummary(n.title) || await fetchSummary(n.title)
+      if (!isPlaceOrPOI(s) || isAdmin(s)) continue
+      const badge = detectBadge(s) || 'Place'
+      const distKm = (n.dist ?? 0) / 1000
+      if (distKm > 35) continue // geofence
+      s._badge = badge
+      s._distKm = distKm
+      ranked.push({ s, score: scoreItem(badge, distKm) })
+      if (ranked.length >= 80) break
     }
     ranked.sort((a, b) => b.score - a.score)
   }
@@ -913,41 +726,22 @@ async function buildWikipediaPool(p) {
   }
 
   // 3) Keyword fallbacks with geofence (≤ 60 km)
-  if (origin && pool.length < 15) { // Only do this if we don't have enough articles yet
+  if (origin) {
     const city = p.admin?.city || p.name || ''
     const state = p.admin?.state || ''
     const country = p.admin?.country || ''
-    
-    // Reduced list of topics for better performance
-    const topics = ['museum', 'park', 'university', 'airport', 'landmark']
-    
-    // Process topics in parallel
-    const topicPromises = topics.map(async (topic) => {
-      const titles = await searchTitles(`${city} ${state} ${country} ${topic}`, 5) // Reduced limit
-      const articlePromises = titles.map(async (t) => {
-        if (seen.has(t)) return null
-        
+    const topics = ['museum','park','historic district','university','airport','stadium','lake','dam','waterfall','bridge','mill','theater','zoo','trail']
+    for (const topic of topics) {
+      const titles = await searchTitles(`${city} ${state} ${country} ${topic}`, 8)
+      for (const t of titles) {
+        if (seen.has(t)) continue
         const s = await fetchNormalizedSummary(t) || await fetchSummary(t)
-        if (!s || !isPlaceOrPOI(s) || isAdmin(s)) return null
-        
+        if (!isPlaceOrPOI(s) || isAdmin(s)) continue
         const km = await kmFromOrigin(s, origin)
-        if (!Number.isFinite(km) || km > 60) return null
-        
+        if (!Number.isFinite(km) || km > 60) continue
         s._badge = detectBadge(s) || 'Place'
         s._distKm = km
-        return s
-      })
-      
-      return Promise.all(articlePromises)
-    })
-    
-    const topicResults = await Promise.all(topicPromises)
-    for (const articles of topicResults) {
-      for (const s of articles) {
-        if (s) {
-          pool.push(s)
-          seen.add(s.title)
-        }
+        pool.push(s); seen.add(s.title)
       }
     }
   }
