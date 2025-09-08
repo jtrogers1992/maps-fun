@@ -29,7 +29,7 @@ export default function Map({ place }) {
   }, [])
 
   useEffect(() => {
-    if (!place || !googleRef.current || !mapObjRef.current) return
+    if (!place || !googleRef.current || !mapObjRef.current || !place.location) return
     const { lat, lng } = place.location
     if (!markerRef.current) {
       markerRef.current = new googleRef.current.maps.Marker({
