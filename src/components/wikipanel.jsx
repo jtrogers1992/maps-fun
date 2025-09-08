@@ -1,5 +1,5 @@
-import * as React from 'react'
-const { useEffect, useMemo, useState } = React
+// Use the globally available React
+const { useEffect, useMemo, useState } = window.React
 
 function wikiUrl(s) {
   // Prefer REST-provided URLs, but fall back to canonical /wiki/Title
