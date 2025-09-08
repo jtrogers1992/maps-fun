@@ -5,9 +5,17 @@
     <link rel="icon" href="data:," />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Maps + Wikipedia (React)</title>
+    <!-- Preload React to ensure it's available before any components try to use it -->
+    <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Make sure React is globally available
+      window.React = React;
+      window.ReactDOM = ReactDOM;
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
