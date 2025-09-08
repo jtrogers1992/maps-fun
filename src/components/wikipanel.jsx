@@ -14,7 +14,9 @@ function wikiUrl(s) {
   return '#'
 }
 
-export default function WikiPanel({ state }) {
+export default function WikiPanel(props) {
+  // Safely handle the case where props might be undefined
+  const state = props ? props.state : { status: 'idle', pool: [] };
   if (state.status === 'idle')    return <p className="muted">Search a place to see Wikipedia results.</p>
   if (state.status === 'loading') return (
     <div className="loading-container">
