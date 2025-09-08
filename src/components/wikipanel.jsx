@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import * as React from 'react'
+const { useEffect, useMemo, useState } = React
 
 function wikiUrl(s) {
   // Prefer REST-provided URLs, but fall back to canonical /wiki/Title
