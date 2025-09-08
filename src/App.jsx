@@ -232,6 +232,12 @@ function isNeighborhood(summary, cityName) {
   const desc = summary.description || '';
   const extract = summary.extract || '';
   
+  // Specific case for "New City, Chicago" which is a neighborhood
+  if (title === 'New City, Chicago') {
+    console.log('Explicitly identified "New City, Chicago" as a neighborhood');
+    return true;
+  }
+  
   // Check if it's explicitly described as a neighborhood
   if (/neighborhood|district|community area|suburb|quarter|borough|residential area/i.test(desc)) {
     console.log(`${title} identified as neighborhood from description`);
@@ -534,14 +540,41 @@ async function buildWikipediaPool(p) {
       try {
         console.log('Trying direct fetch for city:', cityName);
         const directArticle = await fetchSummary(cityName);
-        if (directArticle && 
-            directArticle.title === cityName && 
-            !isNeighborhood(directArticle, cityName) && 
-            !/(council|government|board)/i.test(directArticle.title)) {
-          console.log('Found city via direct fetch:', directArticle.title);
-          primary = directArticle;
-        } else if (directArticle) {
-          console.log('Direct fetch returned unsuitable article:', directArticle.title);
+        
+        // Log detailed information about the article
+        if (directArticle) {
+          console.log('Direct fetch article details:', {
+            title: directArticle.title,
+            description: directArticle.description,
+            extract: directArticle.extract?.substring(0, 100) + '...',
+            type: directArticle.type
+          });
+          
+          // Special handling for "New City, Chicago" issue
+          if (cityName === 'Chicago' && directArticle.title === 'New City, Chicago') {
+            console.log('Detected "New City, Chicago" - this is a neighborhood, not the city');
+            
+            // Try to get the actual Chicago article
+            console.log('Trying direct fetch for "Chicago, Illinois"');
+            const chicagoArticle = await fetchSummary('Chicago, Illinois');
+            if (chicagoArticle && chicagoArticle.title === 'Chicago') {
+              console.log('Successfully found Chicago via "Chicago, Illinois"');
+              primary = chicagoArticle;
+            }
+          } else if (directArticle.title === cityName && 
+                    !isNeighborhood(directArticle, cityName) && 
+                    !/(council|government|board)/i.test(directArticle.title)) {
+            console.log('Found city via direct fetch:', directArticle.title);
+            primary = directArticle;
+          } else {
+            console.log('Direct fetch returned unsuitable article:', directArticle.title);
+            console.log('Reasons for rejection:', {
+              isNeighborhood: isNeighborhood(directArticle, cityName),
+              hasGovernmentTerms: /(council|government|board)/i.test(directArticle.title)
+            });
+          }
+        } else {
+          console.log('Direct fetch returned no article');
         }
       } catch (e) {
         console.error('Error in direct fetch:', e);
@@ -561,6 +594,23 @@ async function buildWikipediaPool(p) {
         }
       }
       
+      // Special case for Chicago - try to fetch it directly by URL
+      if (cityName === 'Chicago' && !primary) {
+        try {
+          console.log('Trying direct REST API fetch for Chicago');
+          const response = await fetch('https://en.wikipedia.org/api/rest_v1/page/summary/Chicago');
+          if (response.ok) {
+            const chicagoArticle = await response.json();
+            if (chicagoArticle && chicagoArticle.title === 'Chicago') {
+              console.log('Successfully found Chicago via direct REST API');
+              primary = chicagoArticle;
+            }
+          }
+        } catch (e) {
+          console.error('Error in direct REST API fetch for Chicago:', e);
+        }
+      }
+      
       // 3. If still no primary, try the search queries
       if (!primary) {
         // Try a more specific query for cities that might have ambiguous names
@@ -570,6 +620,11 @@ async function buildWikipediaPool(p) {
           `${cityName}, ${stateName} city`.trim(),
           `${cityName}, ${countryName} city`.trim()
         ];
+        
+        // For Chicago specifically, add some known-good queries
+        if (cityName === 'Chicago') {
+          specificQueries.unshift('Chicago, Illinois');
+        }
         
         // Combine specific queries with our original queries
         const allQueries = [...specificQueries, ...searchQueries];
@@ -610,7 +665,31 @@ async function buildWikipediaPool(p) {
     }
   }
   
+  // Final check to ensure we're not getting a neighborhood as the primary article
   if (primary) {
+    // Double-check that we're not getting a neighborhood
+    if (isNeighborhood(primary, cityName)) {
+      console.log('WARNING: Primary article is a neighborhood:', primary.title);
+      
+      // For Chicago, make one last attempt to get the right article
+      if (cityName === 'Chicago') {
+        try {
+          console.log('Making final attempt to get Chicago article');
+          const response = await fetch('https://en.wikipedia.org/api/rest_v1/page/summary/Chicago');
+          if (response.ok) {
+            const chicagoArticle = await response.json();
+            if (chicagoArticle && chicagoArticle.title === 'Chicago') {
+              console.log('Successfully found Chicago in final check');
+              primary = chicagoArticle;
+            }
+          }
+        } catch (e) {
+          console.error('Error in final Chicago check:', e);
+        }
+      }
+    }
+    
+    // Add the primary article to the pool
     const km = await kmFromOrigin(primary, origin)
     primary._badge = detectBadge(primary) || 'Place'
     if (Number.isFinite(km)) primary._distKm = km
