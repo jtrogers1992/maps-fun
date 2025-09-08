@@ -1,5 +1,4 @@
-// Use the globally available React
-const { useCallback, useState, useEffect } = window.React
+import { useCallback, useState, useEffect } from 'react'
 import Map from './components/Map.jsx'
 import SearchBox from './components/searchbox.jsx'
 import WikiPanel from './components/wikipanel.jsx'
