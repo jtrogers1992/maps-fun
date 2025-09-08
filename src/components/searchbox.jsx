@@ -47,13 +47,19 @@ export default function SearchBox({ onSelect }) {
         }
 
         const loc = placeObj.location
-        onSelect?.({
-          name: placeObj.displayName,
-          address: placeObj.formattedAddress,
-          location: loc ? { lat: loc.lat(), lng: loc.lng() } : null,
-          admin,
-          types: placeObj.types || [],
-        })
+        
+        // Only proceed if we have a valid location
+        if (loc) {
+          onSelect?.({
+            name: placeObj.displayName,
+            address: placeObj.formattedAddress,
+            location: { lat: loc.lat(), lng: loc.lng() },
+            admin,
+            types: placeObj.types || [],
+          })
+        } else {
+          console.error('Place has no location data')
+        }
       } catch (err) {
         console.error('Place selection error:', err)
       }
