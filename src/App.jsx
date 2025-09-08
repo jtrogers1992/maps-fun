@@ -220,8 +220,23 @@ function detectBadge(summary) {
   return null
 }
 function isAdmin(summary) {
-  const b = detectBadge(summary)
-  return ADMIN_BADGES.includes(b || '')
+  if (!summary) return false;
+  
+  const title = summary.title || '';
+  const b = detectBadge(summary);
+  
+  // Major cities should not be considered administrative divisions
+  // even if they have administrative functions
+  const majorCities = ['Chicago', 'New York', 'Los Angeles', 'San Francisco', 'Boston', 
+                      'Seattle', 'Miami', 'Dallas', 'Houston', 'Philadelphia', 'Phoenix',
+                      'San Diego', 'San Antonio', 'Austin'];
+                      
+  if (majorCities.includes(title)) {
+    console.log(`${title} is a major city, not treating as admin division`);
+    return false;
+  }
+  
+  return ADMIN_BADGES.includes(b || '');
 }
 
 // Helper to detect if an article is likely a neighborhood
@@ -232,12 +247,13 @@ function isNeighborhood(summary, cityName) {
   const desc = summary.description || '';
   const extract = summary.extract || '';
   
-  // Check for common neighborhood naming patterns
-  if (title.includes('New City') || title.includes('Old City') || 
-      title.includes('Downtown') || title.includes('Uptown') || 
-      title.includes('East Side') || title.includes('West Side') || 
-      title.includes('North Side') || title.includes('South Side')) {
-    console.log(`${title} identified as neighborhood from common naming pattern`);
+  // Check for specific neighborhood names
+  if (title === 'New City, Chicago' || 
+      title === 'Old City, Philadelphia' || 
+      title.includes('Downtown') && title.includes(',') || 
+      title.includes('Uptown') && title.includes(',') || 
+      (title.match(/East Side|West Side|North Side|South Side/) && title.includes(','))) {
+    console.log(`${title} identified as specific neighborhood`);
     return true;
   }
   
@@ -383,6 +399,16 @@ async function resolvePrimary(p) {
     if (!s) {
       console.log('Rejected: null summary')
       return false
+    }
+    
+    // Major cities should always be accepted
+    const majorCities = ['Chicago', 'New York', 'Los Angeles', 'San Francisco', 'Boston', 
+                        'Seattle', 'Miami', 'Dallas', 'Houston', 'Philadelphia', 'Phoenix',
+                        'San Diego', 'San Antonio', 'Austin'];
+    
+    if (majorCities.includes(s.title)) {
+      console.log(`Accepted: ${s.title} - is a major city`);
+      return true;
     }
     
     // Reject government bodies like city councils
@@ -594,6 +620,11 @@ async function buildWikipediaPool(p) {
       
       // 3. If still no primary, try the search queries
       if (!primary) {
+        // List of major cities that might need special handling
+        const majorCities = ['Chicago', 'New York', 'Los Angeles', 'San Francisco', 'Boston', 
+                           'Seattle', 'Miami', 'Dallas', 'Houston', 'Philadelphia', 'Phoenix',
+                           'San Diego', 'San Antonio', 'Austin'];
+        
         // Try a more specific query for cities that might have ambiguous names
         const specificQueries = [
           `${cityName} city`,
@@ -601,6 +632,12 @@ async function buildWikipediaPool(p) {
           `${cityName}, ${stateName} city`.trim(),
           `${cityName}, ${countryName} city`.trim()
         ];
+        
+        // For major cities, try the exact city name first
+        if (majorCities.includes(cityName)) {
+          console.log(`${cityName} is a major city, prioritizing exact name match`);
+          specificQueries.unshift(cityName);
+        }
         
         // Add city with state as a high-priority query
         const cityWithState = `${cityName}, ${p.admin?.stateCode || stateName}`.trim();
