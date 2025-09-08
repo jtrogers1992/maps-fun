@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 
 function wikiUrl(s) {
   // Prefer REST-provided URLs, but fall back to canonical /wiki/Title
@@ -14,17 +14,9 @@ function wikiUrl(s) {
   return '#'
 }
 
-export default function WikiPanel(props) {
-  // Safely handle the case where props might be undefined
-  const state = props ? props.state : { status: 'idle', pool: [] };
+export default function WikiPanel({ state }) {
   if (state.status === 'idle')    return <p className="muted">Search a place to see Wikipedia results.</p>
-  if (state.status === 'loading') return (
-    <div className="loading-container">
-      <p className="muted">Loading Wikipedia articles...</p>
-      <div className="loading-spinner"></div>
-      <p className="muted small">This may take a moment</p>
-    </div>
-  )
+  if (state.status === 'loading') return <p className="muted">Loading Wikipedia…</p>
   if (state.status === 'error')   return <p className="muted">Couldn’t load Wikipedia info.</p>
 
   const pool = state.pool || []
