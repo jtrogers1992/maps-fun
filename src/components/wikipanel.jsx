@@ -29,11 +29,16 @@ export default function WikiPanel({ state }) {
     if (!pool.length) return []
     const primary = pool.find(x => x._isPrimary)
     const extras = primary ? pool.filter(x => x !== primary) : pool
+    
+    // If we have 4 or fewer extras, show all of them plus primary if it exists
     if (extras.length <= 4) return primary ? [primary, ...extras] : extras.slice(0, 5)
+    
+    // For more than 4 extras, we need to rotate and show 4 of them plus primary
     const start = offset % extras.length
     const rotated = extras.slice(start, start + 4)
       .concat(start + 4 > extras.length ? extras.slice(0, (start + 4) % extras.length) : [])
-      .slice(0, 4)
+      .slice(0, primary ? 4 : 5) // Show 4 if we have primary, 5 if we don't
+    
     return primary ? [primary, ...rotated] : rotated
   }, [pool, offset])
 
