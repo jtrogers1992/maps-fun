@@ -1,5 +1,4 @@
-import * as React from 'react'
-const { useEffect, useMemo, useState } = React
+import React, { useEffect, useMemo, useState } from 'react'
 
 function wikiUrl(s) {
   // Prefer REST-provided URLs, but fall back to canonical /wiki/Title
@@ -15,9 +14,7 @@ function wikiUrl(s) {
   return '#'
 }
 
-export default function WikiPanel(props) {
-  // Defensive check for props
-  const state = props?.state || { status: 'idle', pool: [] };
+export default function WikiPanel({ state }) {
   if (state.status === 'idle')    return <p className="muted">Search a place to see Wikipedia results.</p>
   if (state.status === 'loading') return (
     <div className="loading-container">
