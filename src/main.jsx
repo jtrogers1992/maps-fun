@@ -3,15 +3,15 @@ import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import './styles.css'
 
-// Wait for DOM to be ready
-document.addEventListener('DOMContentLoaded', () => {
-  const rootElement = document.getElementById('root');
-  if (!rootElement) {
-    console.error('Root element not found');
-    return;
-  }
-  
+// Get the root element
+const rootElement = document.getElementById('root');
+
+// Check if root element exists
+if (!rootElement) {
+  console.error('Root element not found');
+} else {
   try {
+    // Create root and render app
     const root = ReactDOM.createRoot(rootElement);
     root.render(
       <React.StrictMode>
@@ -22,4 +22,4 @@ document.addEventListener('DOMContentLoaded', () => {
   } catch (error) {
     console.error('Error rendering React app:', error);
   }
-})
+}
