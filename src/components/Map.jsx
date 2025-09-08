@@ -1,7 +1,9 @@
 import React, { useEffect, useRef } from 'react'
 import { Loader } from '@googlemaps/js-api-loader'
 
-export default function Map({ place }) {
+export default function Map(props) {
+  // Safely handle the case where props might be undefined
+  const place = props ? props.place : null;
   const mapRef = useRef(null)
   const markerRef = useRef(null)
   const googleRef = useRef(null)
