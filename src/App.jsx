@@ -1,5 +1,4 @@
-import * as React from 'react'
-const { useCallback, useState, useEffect } = React
+import React, { useCallback, useState, useEffect } from 'react'
 import Map from './components/Map.jsx'
 import SearchBox from './components/searchbox.jsx'
 import WikiPanel from './components/wikipanel.jsx'
