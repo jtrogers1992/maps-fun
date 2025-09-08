@@ -1,7 +1,9 @@
 import React, { useEffect, useRef } from 'react'
 import { Loader } from '@googlemaps/js-api-loader'
 
-export default function SearchBox({ onSelect }) {
+export default function SearchBox(props) {
+  // Safely handle the case where props might be undefined
+  const onSelect = props ? props.onSelect : () => {};
   const hostRef = useRef(null)
   const elRef = useRef(null)
 
