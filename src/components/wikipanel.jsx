@@ -1,5 +1,4 @@
-// Use the globally available React
-const { useEffect, useMemo, useState } = window.React
+import { useEffect, useMemo, useState } from 'react'
 
 function wikiUrl(s) {
   // Prefer REST-provided URLs, but fall back to canonical /wiki/Title
