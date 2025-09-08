@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react'
+import React, { useCallback, useState, useEffect } from 'react'
 import Map from './components/Map.jsx'
 import SearchBox from './components/searchbox.jsx'
 import WikiPanel from './components/wikipanel.jsx'
@@ -6,6 +6,18 @@ import WikiPanel from './components/wikipanel.jsx'
 export default function App() {
   const [place, setPlace] = useState(null)
   const [wiki, setWiki] = useState({ status: 'idle', pool: [] })
+  
+  // Debug effect to log wiki state changes
+  useEffect(() => {
+    if (wiki.status === 'ready') {
+      console.log('Wiki state updated:', {
+        status: wiki.status,
+        poolSize: wiki.pool.length,
+        hasPrimary: !!wiki.pool.find(x => x._isPrimary),
+        primaryTitle: wiki.pool.find(x => x._isPrimary)?.title || 'None'
+      })
+    }
+  }, [wiki])
 
   const onPlaceSelected = useCallback(async (p) => {
     setPlace(p)
@@ -118,7 +130,7 @@ async function kmFromOrigin(summary, origin) {
 
 /** ---- Classification (tightened) ---- */
 
-// Explicitly exclude non-place “meta” pages (offices, elections, lists, agencies, etc.)
+// Explicitly exclude non-place "meta" pages (offices, elections, lists, agencies, etc.)
 const NON_PLACE_BLOCK = new RegExp(
   [
     '\\bmayor\\b','\\bgovernor\\b','\\bminister\\b','\\bpresident\\b','\\bprime minister\\b',
@@ -126,7 +138,9 @@ const NON_PLACE_BLOCK = new RegExp(
     '\\bdepartment\\b','\\bagency\\b','\\bauthority\\b','\\badministration\\b',
     '\\belection\\b','\\breferendum\\b','\\bby-election\\b',
     '^list of\\b','\\bindex of\\b','\\boutline of\\b','\\btimeline of\\b',
-    '\\bschool district\\b','\\bpolice department\\b','\\bfire department\\b'
+    '\\bschool district\\b','\\bpolice department\\b','\\bfire department\\b',
+    '\\bcity council\\b', '\\bmunicipal council\\b', '\\btown council\\b',
+    '\\bgovernment of\\b', '\\blegislature\\b', '\\bparliament\\b'
   ].join('|'),
   'i'
 )
@@ -134,10 +148,26 @@ const NON_PLACE_BLOCK = new RegExp(
 // Does a title look like a place name?
 function titleLooksLikePlace(title = '') {
   const t = title.trim()
-  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true          // "City, State/Country"
-  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true        // "City (State/Country)"
-  if (/^(city|town|village|municipality) of /i.test(t)) return true // "City of X"
-  return /^[A-Z][a-zA-Z'. -]+$/.test(t)                      // single-name major places
+  
+  // Reject titles with government/council terms
+  if (/council|government|legislature|parliament|board|commission|committee|authority|agency|department/i.test(t)) {
+    return false;
+  }
+  
+  // "City, State/Country"
+  if (/, [A-Z][a-zA-Z(). -]+$/.test(t)) return true
+  
+  // "City (State/Country)"
+  if (/\([A-Z][a-zA-Z(). -]+\)$/.test(t)) return true
+  
+  // "City of X"
+  if (/^(city|town|village|municipality) of /i.test(t)) return true
+  
+  // Common city name patterns
+  if (/^(north|south|east|west|new|old|san|santa|saint|st\.|mount|mt\.) [A-Z][a-zA-Z'. -]+$/i.test(t)) return true
+  
+  // single-name major places
+  return /^[A-Z][a-zA-Z'. -]+$/.test(t)
 }
 
 const BADGE_RULES = [
@@ -193,13 +223,95 @@ function isAdmin(summary) {
   const b = detectBadge(summary)
   return ADMIN_BADGES.includes(b || '')
 }
+
+// Helper to detect if an article is likely a neighborhood
+function isNeighborhood(summary, cityName) {
+  if (!summary) return false;
+  
+  const title = summary.title || '';
+  const desc = summary.description || '';
+  const extract = summary.extract || '';
+  
+  // Check for common neighborhood naming patterns
+  if (title.includes('New City') || title.includes('Old City') || 
+      title.includes('Downtown') || title.includes('Uptown') || 
+      title.includes('East Side') || title.includes('West Side') || 
+      title.includes('North Side') || title.includes('South Side')) {
+    console.log(`${title} identified as neighborhood from common naming pattern`);
+    return true;
+  }
+  
+  // Check if it's explicitly described as a neighborhood
+  if (/neighborhood|district|community area|suburb|quarter|borough|residential area/i.test(desc)) {
+    console.log(`${title} identified as neighborhood from description`);
+    return true;
+  }
+  
+  // Check for "X, CityName" pattern which often indicates a neighborhood
+  if (cityName && title.endsWith(`, ${cityName}`)) {
+    // But make sure the city name itself isn't in this format (e.g., "Chicago, Illinois")
+    if (title !== cityName) {
+      console.log(`${title} identified as neighborhood from title pattern`);
+      return true;
+    }
+  }
+  
+  // Check for "X (neighborhood in CityName)" pattern
+  if (cityName && /\(.*\bin\b.*\)/i.test(title) && title.includes(cityName)) {
+    console.log(`${title} identified as neighborhood from parenthetical`);
+    return true;
+  }
+  
+  // Check the extract for neighborhood indicators
+  if (extract && /\bis a neighborhood\b|\bis a district\b|\bis a community\b|\bis a residential area\b/i.test(extract)) {
+    console.log(`${title} identified as neighborhood from extract`);
+    return true;
+  }
+  
+  // Check for "New X" pattern when X is the city name (common for neighborhoods)
+  if (cityName && title.startsWith('New ') && cityName.includes(title.substring(4))) {
+    console.log(`${title} identified as neighborhood from 'New X' pattern`);
+    return true;
+  }
+  
+  return false;
+}
 function isPlaceOrPOI(summary) {
-  if (!summary || summary.type === 'disambiguation') return false
+  if (!summary) {
+    console.log('isPlaceOrPOI: Rejected null summary');
+    return false;
+  }
+  if (summary.type === 'disambiguation') {
+    console.log('isPlaceOrPOI: Rejected disambiguation page:', summary.title);
+    return false;
+  }
+  
   const title = (summary.title || '')
   const desc  = (summary.description || '')
-  if (/(actor|actress|company|band|singer|politician|software|film|novel|surname)/i.test(desc)) return false
-  if (NON_PLACE_BLOCK.test(title) || NON_PLACE_BLOCK.test(desc)) return false
-  return !!detectBadge(summary)
+  
+  if (/(actor|actress|company|band|singer|politician|software|film|novel|surname)/i.test(desc)) {
+    console.log('isPlaceOrPOI: Rejected person/media:', summary.title, '-', desc);
+    return false;
+  }
+  
+  if (NON_PLACE_BLOCK.test(title) || NON_PLACE_BLOCK.test(desc)) {
+    console.log('isPlaceOrPOI: Rejected by NON_PLACE_BLOCK:', summary.title);
+    return false;
+  }
+  
+  const badge = detectBadge(summary);
+  const result = !!badge;
+  
+  if (!result) {
+    console.log('isPlaceOrPOI: No badge detected for:', summary.title, '-', desc);
+    // If it looks like a place name but didn't get a badge, let's accept it anyway
+    if (titleLooksLikePlace(title)) {
+      console.log('isPlaceOrPOI: But title looks like a place, accepting:', title);
+      return true;
+    }
+  }
+  
+  return result;
 }
 
 // --- Search helpers ---
@@ -259,14 +371,60 @@ async function geoSearch(lat, lng, radiusM = 30000, limit = 60) {
 /* ---------- Primary resolver (robust: normalize + near-match + distance if available) ---------- */
 async function resolvePrimary(p) {
   const origin = p.location
+  console.log('Resolving primary for:', p.name, p.admin?.city, origin)
+
+  // Helper to check if a title contains government/council terms
+  const isGovernmentBody = (title) => {
+    const lowerTitle = (title || '').toLowerCase();
+    return /council|government|legislature|parliament|board|commission|committee|authority|agency|department/i.test(lowerTitle);
+  };
 
   const accept = async (s) => {
-    if (!s || isAdmin(s)) return false
-    if (/^mayor of\b/i.test(s.title)) return false
+    if (!s) {
+      console.log('Rejected: null summary')
+      return false
+    }
+    
+    // Reject government bodies like city councils
+    if (isGovernmentBody(s.title)) {
+      console.log('Rejected:', s.title, '- is a government body')
+      return false
+    }
+    
+    if (isAdmin(s)) {
+      console.log('Rejected:', s.title, '- is admin')
+      return false
+    }
+    
+    if (/^mayor of\b/i.test(s.title)) {
+      console.log('Rejected:', s.title, '- mayor pattern')
+      return false
+    }
+    
+    // Prioritize exact city name matches
+    const cityName = p.admin?.city || '';
+    if (cityName && s.title === cityName) {
+      console.log('Accepted:', s.title, '- exact city name match')
+      return true;
+    }
+    
     const badge = detectBadge(s)
-    if (!(badge === 'Place' || badge === 'Country' || badge === 'State/Province')) return false
+    // Accept more badge types, especially for cities and places
+    const validBadges = ['Place', 'Country', 'State/Province', 'County', 'Neighborhood']
+    if (!validBadges.includes(badge)) {
+      // If the title looks like a place name, accept it regardless of badge
+      if (titleLooksLikePlace(s.title)) {
+        console.log('Accepted despite badge:', s.title, '- title looks like a place')
+        return true
+      }
+      console.log('Rejected:', s.title, '- badge is', badge)
+      return false
+    }
+    
     const km = await kmFromOrigin(s, origin)
-    return !Number.isFinite(km) || km <= 150
+    const result = !Number.isFinite(km) || km <= 150
+    if (!result) console.log('Rejected:', s.title, '- distance is', km, 'km')
+    return result
   }
 
   // 0) Bare names + pre-comma variant
@@ -355,15 +513,156 @@ async function buildWikipediaPool(p) {
   const origin = p.location
   const pool = []
   const seen = new Set()
+  console.log('Building Wikipedia pool for:', p.name, p.admin?.city)
 
   // 1) Primary (explicitly flagged)
-  const primary = await resolvePrimary(p)
+  let primary = await resolvePrimary(p)
+  console.log('Primary article found:', primary ? primary.title : 'None')
+  
+  // If no primary article was found, try a direct search for the city name
+  if (!primary && p.admin?.city) {
+    console.log('No primary found, trying direct search for city:', p.admin.city)
+    try {
+      // Try multiple search strategies for major cities
+      const cityName = p.admin.city;
+      const stateName = p.admin?.state || '';
+      const countryName = p.admin?.country || '';
+      
+      // List of search queries to try, in order of preference
+      const searchQueries = [
+        cityName, // Just the city name
+        `${cityName}, ${p.admin?.stateCode || ''}`.trim(), // City, State code
+        `${cityName}, ${stateName}`.trim(), // City, State
+        `${cityName} (${stateName})`.trim(), // City (State)
+        `${cityName}, ${countryName}`.trim() // City, Country
+      ];
+      
+      // For all cities, try a more robust approach to find the primary article
+      
+      // 1. Try direct fetch by exact name first (most reliable for well-known places)
+      try {
+        console.log('Trying direct fetch for city:', cityName);
+        const directArticle = await fetchSummary(cityName);
+        
+        // Log detailed information about the article
+        if (directArticle) {
+          console.log('Direct fetch article details:', {
+            title: directArticle.title,
+            description: directArticle.description,
+            extract: directArticle.extract?.substring(0, 100) + '...',
+            type: directArticle.type
+          });
+          
+          // Check if this is a suitable article for the city
+          if (directArticle.title === cityName && 
+              !isNeighborhood(directArticle, cityName) && 
+              !/(council|government|board)/i.test(directArticle.title)) {
+            console.log('Found city via direct fetch:', directArticle.title);
+            primary = directArticle;
+          } else {
+            console.log('Direct fetch returned unsuitable article:', directArticle.title);
+            console.log('Reasons for rejection:', {
+              isNeighborhood: isNeighborhood(directArticle, cityName),
+              hasGovernmentTerms: /(council|government|board)/i.test(directArticle.title)
+            });
+          }
+        } else {
+          console.log('Direct fetch returned no article');
+        }
+      } catch (e) {
+        console.error('Error in direct fetch:', e);
+      }
+      
+      // 2. If direct fetch didn't work, try normalized search
+      if (!primary) {
+        const exactMatch = await fetchNormalizedSummary(cityName);
+        if (exactMatch && 
+            exactMatch.type !== 'disambiguation' && 
+            !/(council|government|board)/i.test(exactMatch.title) && 
+            !isNeighborhood(exactMatch, cityName)) {
+          console.log('Found city via normalized search:', exactMatch.title);
+          primary = exactMatch;
+        } else if (exactMatch) {
+          console.log('Normalized search returned unsuitable article:', exactMatch.title);
+        }
+      }
+      
+      // Try to fetch a better article if we haven't found one yet
+      if (!primary) {
+        console.log('No primary article found yet, continuing with search queries');
+      }
+      
+      // 3. If still no primary, try the search queries
+      if (!primary) {
+        // Try a more specific query for cities that might have ambiguous names
+        const specificQueries = [
+          `${cityName} city`,
+          `${cityName}, ${p.admin?.stateCode || ''} city`.trim(),
+          `${cityName}, ${stateName} city`.trim(),
+          `${cityName}, ${countryName} city`.trim()
+        ];
+        
+        // Add city with state as a high-priority query
+        const cityWithState = `${cityName}, ${p.admin?.stateCode || stateName}`.trim();
+        if (cityWithState !== cityName && cityWithState.length > cityName.length) {
+          specificQueries.unshift(cityWithState);
+        }
+        
+        // Combine specific queries with our original queries
+        const allQueries = [...specificQueries, ...searchQueries];
+        
+        for (const query of allQueries) {
+          if (!query) continue;
+          console.log('Trying search query:', query);
+          const cityTitle = await searchNearmatch(query);
+          if (cityTitle) {
+            const citySummary = await fetchNormalizedSummary(cityTitle) || await fetchSummary(cityTitle);
+            if (citySummary && 
+                citySummary.type !== 'disambiguation' && 
+                !/(council|government|board)/i.test(citySummary.title) && 
+                !isNeighborhood(citySummary, cityName)) {
+              
+              // Extra check: if the title is exactly the city name, that's a strong match
+              if (citySummary.title === cityName) {
+                console.log('Found exact city name match:', citySummary.title);
+                primary = citySummary;
+                break;
+              }
+              
+              // Otherwise, accept this as a good match
+              console.log('Found city article via search query:', query, '->', citySummary.title);
+              primary = citySummary;
+              break;
+            } else if (citySummary) {
+              console.log('Rejected candidate:', citySummary.title, 
+                         isNeighborhood(citySummary, cityName) ? '- is neighborhood' : 
+                         citySummary.type === 'disambiguation' ? '- is disambiguation' : 
+                         '- other rejection reason');
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Error in direct city search:', e);
+    }
+  }
+  
+  // Final check to ensure we're not getting a neighborhood as the primary article
   if (primary) {
+    // Double-check that we're not getting a neighborhood
+    const cityName = p.admin?.city || '';
+    if (isNeighborhood(primary, cityName)) {
+      console.log('WARNING: Primary article is a neighborhood:', primary.title);
+      // We'll try to find a better article in the ranked results
+    }
+    
+    // Add the primary article to the pool
     const km = await kmFromOrigin(primary, origin)
     primary._badge = detectBadge(primary) || 'Place'
     if (Number.isFinite(km)) primary._distKm = km
     primary._isPrimary = true
     pool.push(primary); seen.add(primary.title)
+    console.log('Added primary article to pool:', primary.title, 'with badge:', primary._badge)
   }
 
   // 2) Ranked nearby POIs (exclude admin)
@@ -431,5 +730,7 @@ async function buildWikipediaPool(p) {
     if (country) await tryAdd(country)
   }
 
-  return pool.slice(0, 51)
+  const result = pool.slice(0, 51)
+  console.log('Final pool size:', result.length, 'Primary article included:', !!result.find(x => x._isPrimary))
+  return result
 }
