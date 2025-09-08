@@ -223,6 +223,50 @@ function isAdmin(summary) {
   const b = detectBadge(summary)
   return ADMIN_BADGES.includes(b || '')
 }
+
+// Helper to detect if an article is likely a neighborhood
+function isNeighborhood(summary, cityName) {
+  if (!summary) return false;
+  
+  const title = summary.title || '';
+  const desc = summary.description || '';
+  const extract = summary.extract || '';
+  
+  // Check if it's explicitly described as a neighborhood
+  if (/neighborhood|district|community area|suburb|quarter|borough|residential area/i.test(desc)) {
+    console.log(`${title} identified as neighborhood from description`);
+    return true;
+  }
+  
+  // Check for "X, CityName" pattern which often indicates a neighborhood
+  if (cityName && title.endsWith(`, ${cityName}`)) {
+    // But make sure the city name itself isn't in this format (e.g., "Chicago, Illinois")
+    if (title !== cityName) {
+      console.log(`${title} identified as neighborhood from title pattern`);
+      return true;
+    }
+  }
+  
+  // Check for "X (neighborhood in CityName)" pattern
+  if (cityName && /\(.*\bin\b.*\)/i.test(title) && title.includes(cityName)) {
+    console.log(`${title} identified as neighborhood from parenthetical`);
+    return true;
+  }
+  
+  // Check the extract for neighborhood indicators
+  if (extract && /\bis a neighborhood\b|\bis a district\b|\bis a community\b|\bis a residential area\b/i.test(extract)) {
+    console.log(`${title} identified as neighborhood from extract`);
+    return true;
+  }
+  
+  // Check for "New X" pattern when X is the city name (common for neighborhoods)
+  if (cityName && title.startsWith('New ') && cityName.includes(title.substring(4))) {
+    console.log(`${title} identified as neighborhood from 'New X' pattern`);
+    return true;
+  }
+  
+  return false;
+}
 function isPlaceOrPOI(summary) {
   if (!summary) {
     console.log('isPlaceOrPOI: Rejected null summary');
@@ -470,16 +514,99 @@ async function buildWikipediaPool(p) {
   if (!primary && p.admin?.city) {
     console.log('No primary found, trying direct search for city:', p.admin.city)
     try {
-      const cityTitle = await searchNearmatch(p.admin.city)
-      if (cityTitle) {
-        const citySummary = await fetchNormalizedSummary(cityTitle) || await fetchSummary(cityTitle)
-        if (citySummary && citySummary.type !== 'disambiguation' && !/(council|government|board)/i.test(citySummary.title)) {
-          console.log('Found city article via direct search:', citySummary.title)
-          primary = citySummary
+      // Try multiple search strategies for major cities
+      const cityName = p.admin.city;
+      const stateName = p.admin?.state || '';
+      const countryName = p.admin?.country || '';
+      
+      // List of search queries to try, in order of preference
+      const searchQueries = [
+        cityName, // Just the city name
+        `${cityName}, ${p.admin?.stateCode || ''}`.trim(), // City, State code
+        `${cityName}, ${stateName}`.trim(), // City, State
+        `${cityName} (${stateName})`.trim(), // City (State)
+        `${cityName}, ${countryName}`.trim() // City, Country
+      ];
+      
+      // For all cities, try a more robust approach to find the primary article
+      
+      // 1. Try direct fetch by exact name first (most reliable for well-known places)
+      try {
+        console.log('Trying direct fetch for city:', cityName);
+        const directArticle = await fetchSummary(cityName);
+        if (directArticle && 
+            directArticle.title === cityName && 
+            !isNeighborhood(directArticle, cityName) && 
+            !/(council|government|board)/i.test(directArticle.title)) {
+          console.log('Found city via direct fetch:', directArticle.title);
+          primary = directArticle;
+        } else if (directArticle) {
+          console.log('Direct fetch returned unsuitable article:', directArticle.title);
+        }
+      } catch (e) {
+        console.error('Error in direct fetch:', e);
+      }
+      
+      // 2. If direct fetch didn't work, try normalized search
+      if (!primary) {
+        const exactMatch = await fetchNormalizedSummary(cityName);
+        if (exactMatch && 
+            exactMatch.type !== 'disambiguation' && 
+            !/(council|government|board)/i.test(exactMatch.title) && 
+            !isNeighborhood(exactMatch, cityName)) {
+          console.log('Found city via normalized search:', exactMatch.title);
+          primary = exactMatch;
+        } else if (exactMatch) {
+          console.log('Normalized search returned unsuitable article:', exactMatch.title);
+        }
+      }
+      
+      // 3. If still no primary, try the search queries
+      if (!primary) {
+        // Try a more specific query for cities that might have ambiguous names
+        const specificQueries = [
+          `${cityName} city`,
+          `${cityName}, ${p.admin?.stateCode || ''} city`.trim(),
+          `${cityName}, ${stateName} city`.trim(),
+          `${cityName}, ${countryName} city`.trim()
+        ];
+        
+        // Combine specific queries with our original queries
+        const allQueries = [...specificQueries, ...searchQueries];
+        
+        for (const query of allQueries) {
+          if (!query) continue;
+          console.log('Trying search query:', query);
+          const cityTitle = await searchNearmatch(query);
+          if (cityTitle) {
+            const citySummary = await fetchNormalizedSummary(cityTitle) || await fetchSummary(cityTitle);
+            if (citySummary && 
+                citySummary.type !== 'disambiguation' && 
+                !/(council|government|board)/i.test(citySummary.title) && 
+                !isNeighborhood(citySummary, cityName)) {
+              
+              // Extra check: if the title is exactly the city name, that's a strong match
+              if (citySummary.title === cityName) {
+                console.log('Found exact city name match:', citySummary.title);
+                primary = citySummary;
+                break;
+              }
+              
+              // Otherwise, accept this as a good match
+              console.log('Found city article via search query:', query, '->', citySummary.title);
+              primary = citySummary;
+              break;
+            } else if (citySummary) {
+              console.log('Rejected candidate:', citySummary.title, 
+                         isNeighborhood(citySummary, cityName) ? '- is neighborhood' : 
+                         citySummary.type === 'disambiguation' ? '- is disambiguation' : 
+                         '- other rejection reason');
+            }
+          }
         }
       }
     } catch (e) {
-      console.error('Error in direct city search:', e)
+      console.error('Error in direct city search:', e);
     }
   }
   
