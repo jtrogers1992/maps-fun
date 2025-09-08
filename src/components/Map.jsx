@@ -1,5 +1,5 @@
-import * as React from 'react'
-const { useEffect, useRef } = React
+// Use the globally available React
+const { useEffect, useRef } = window.React
 import { Loader } from '@googlemaps/js-api-loader'
 
 export default function Map(props) {
