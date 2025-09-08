@@ -20,6 +20,13 @@ export default function App() {
   }, [wiki])
 
   const onPlaceSelected = useCallback(async (p) => {
+    // Ensure we have a valid place with a location
+    if (!p || !p.location) {
+      console.error('Invalid place or missing location')
+      setWiki({ status: 'error', pool: [] })
+      return
+    }
+    
     setPlace(p)
     setWiki({ status: 'loading', pool: [] })
     try {
@@ -693,6 +700,11 @@ function scoreItem(badge, distKm) {
 }
 
 async function buildWikipediaPool(p) {
+  if (!p || !p.location) {
+    console.error('Cannot build Wikipedia pool: Invalid place or missing location')
+    return []
+  }
+  
   const origin = p.location
   const pool = []
   const seen = new Set()
